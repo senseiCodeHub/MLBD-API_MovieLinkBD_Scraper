@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-canvas font-sans text-ink antialiased;
+    background-image: radial-gradient(
+      60% 38% at 50% 0%,
+      rgb(245 165 36 / 0.06),
+      transparent 72%
+    );
+    background-repeat: no-repeat;
+  }
+
+  ::selection {
+    background-color: rgb(245 165 36 / 0.3);
+    color: #fff8ec;
+  }
+
+  :where(a, button, input, [tabindex]):focus-visible {
+    @apply outline-none ring-2 ring-amber/70 ring-offset-2 ring-offset-canvas;
+  }
+
+  input::placeholder {
+    color: #8a827b;
+    opacity: 1;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #3d3630 transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: #3d3630;
+    border: 3px solid #0a0908;
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: #574d44;
+  }
+}

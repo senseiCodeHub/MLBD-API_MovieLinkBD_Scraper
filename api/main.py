@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
+
+try:  # optional: .env is handy for the local service-role key
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover
+    pass
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from scraper import store as dbstore
 from scraper.catalog import (
     CatalogItem,
     CatalogResults,
@@ -30,6 +39,8 @@ from scraper.search import search_content
 
 SCRAPE_TIMEOUT = 150
 SEARCH_TIMEOUT = 120
+# How long a stored scrape counts as fresh enough to serve when live fails.
+SCRAPE_CACHE_TTL_SECONDS = int(os.getenv("MLBD_SCRAPE_CACHE_SECONDS", "21600"))
 
 _TYPE_TO_CATEGORY = {
     "movie": "movie",
@@ -39,6 +50,79 @@ _TYPE_TO_CATEGORY = {
     "download18plus": "adult",
     "adult": "adult",
 }
+
+
+async def _search_from_db(
+    query: str,
+    category: str,
+    limit: int,
+    offset: int,
+    reason: str | None = None,
+) -> CatalogResults:
+    """Search the Supabase mirror of the catalogue index."""
+    store = dbstore.get_store()
+    if store is None:
+        raise ScraperError(
+            reason
+            or "Supabase is not configured (set SUPABASE_URL and "
+            "SUPABASE_SERVICE_ROLE_KEY), and the live catalogue is unreachable"
+        )
+    items, total = await asyncio.wait_for(
+        store.search_titles(
+            query, category=category, limit=limit, offset=offset
+        ),
+        timeout=30,
+    )
+    if reason:
+        logger.warning("Live catalogue unavailable ({}); served from Supabase", reason)
+    return CatalogResults(
+        query=query,
+        category=category,  # type: ignore[arg-type]
+        results=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        source="db",
+        catalog_count=None,
+    )
+
+
+async def _store_scrape(payload: dict, requested_url: str) -> None:
+    """Persist one scrape snapshot; failures never break the response."""
+    store = dbstore.get_store()
+    if store is None:
+        return
+    try:
+        saved = await asyncio.wait_for(
+            store.save_scrape(payload, requested_url=requested_url), timeout=60
+        )
+        logger.info(
+            "Stored scrape for {} ({})", payload.get("page_url"), saved
+        )
+    except (ScraperError, asyncio.TimeoutError) as exc:
+        logger.warning("Could not store scrape in Supabase: {}", exc)
+
+
+async def _cached_scrape(
+    page_url: str, reason: str | None = None
+) -> dict | None:
+    """Return a fresh stored snapshot for ``page_url``, if any."""
+    store = dbstore.get_store()
+    if store is None:
+        return None
+    try:
+        cached = await asyncio.wait_for(
+            store.cached_scrape(page_url, SCRAPE_CACHE_TTL_SECONDS), timeout=20
+        )
+    except (ScraperError, asyncio.TimeoutError) as exc:
+        logger.warning("Could not read cached scrape: {}", exc)
+        return None
+    if cached is None:
+        return None
+    payload, age = cached
+    if reason:
+        logger.warning("Live scrape failed ({}); serving stored copy", reason)
+    return {**payload, "cached": True, "cache_age_seconds": age}
 
 
 async def _warm_catalog() -> None:
@@ -103,11 +187,25 @@ async def health() -> dict[str, str]:
 async def scrape(req: ScrapeRequest) -> ScrapeResponse:
     """Scrape every episode's stream and download links from a detail page."""
     try:
-        result = await asyncio.wait_for(
-            scrape_streams(req.url, timeout=30, probe=req.probe),
-            timeout=SCRAPE_TIMEOUT,
-        )
-        return ScrapeResponse(ok=True, data=result.model_dump())
+        try:
+            result = await asyncio.wait_for(
+                scrape_streams(req.url, timeout=30, probe=req.probe),
+                timeout=SCRAPE_TIMEOUT,
+            )
+        except (
+            CloudflareBlocked,
+            NoStreamFound,
+            BrowserError,
+            ScraperError,
+            asyncio.TimeoutError,
+        ) as exc:
+            cached = await _cached_scrape(req.url, reason=str(exc))
+            if cached is not None:
+                return ScrapeResponse(ok=True, data=cached)
+            raise
+        payload = result.model_dump(mode="json")
+        await _store_scrape(payload, req.url)
+        return ScrapeResponse(ok=True, data=payload)
     except CloudflareBlocked as exc:
         return ScrapeResponse(
             ok=False,
@@ -161,16 +259,21 @@ async def search(
     ] = Query("all", description="Category filter"),
     limit: int = Query(24, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    scope: Literal["catalog", "site"] = Query(
+    scope: Literal["catalog", "site", "db"] = Query(
         "catalog",
-        description="catalog = whole server index; site = the site's 25-result search",
+        description=(
+            "catalog = whole server index; site = the site's 25-result search; "
+            "db = the Supabase mirror"
+        ),
     ),
 ) -> SearchResponse:
     """Search the whole MovieLinkBD catalogue (or the site's own search page)."""
     query = q.strip()
 
     try:
-        if scope == "site":
+        if scope == "db":
+            data = await _search_from_db(query, category, limit, offset)
+        elif scope == "site":
             if not query:
                 raise ScraperError("Search query is empty")
             site = await asyncio.wait_for(
@@ -212,15 +315,20 @@ async def search(
                 searched_at=site.searched_at,
             )
         else:
-            data = await asyncio.wait_for(
-                search_catalog(
-                    query,
-                    category=category,
-                    limit=limit,
-                    offset=offset,
-                ),
-                timeout=SEARCH_TIMEOUT,
-            )
+            try:
+                data = await asyncio.wait_for(
+                    search_catalog(
+                        query,
+                        category=category,
+                        limit=limit,
+                        offset=offset,
+                    ),
+                    timeout=SEARCH_TIMEOUT,
+                )
+            except (CloudflareBlocked, ScraperError) as exc:
+                data = await _search_from_db(
+                    query, category, limit, offset, reason=str(exc)
+                )
         return SearchResponse(ok=True, data=data)
     except CloudflareBlocked as exc:
         return SearchResponse(
@@ -246,6 +354,36 @@ async def search(
 async def catalog_status() -> dict:
     """Report whether the whole-catalogue index is loaded and how big it is."""
     return await catalog_stats()
+
+
+@app.post("/catalog/sync")
+async def catalog_sync(force: bool = Query(False)) -> dict:
+    """Push the local catalogue index into Supabase (titles table)."""
+    try:
+        return await asyncio.wait_for(
+            dbstore.sync_catalog(force=force), timeout=600
+        )
+    except (ScraperError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/db/status")
+async def db_status() -> dict:
+    """Report whether Supabase is configured and what the mirror holds."""
+    store = dbstore.get_store()
+    if store is None:
+        return {
+            "configured": False,
+            "hint": (
+                "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env "
+                "to mirror data into Supabase"
+            ),
+        }
+    try:
+        stats = await asyncio.wait_for(store.stats(), timeout=30)
+    except (ScraperError, asyncio.TimeoutError) as exc:
+        return {"configured": True, "ok": False, "error": str(exc)}
+    return {"configured": True, **stats}
 
 
 @app.post("/catalog/refresh")

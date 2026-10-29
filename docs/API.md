@@ -85,7 +85,7 @@ search page.
 | `category` | enum | `all` | `all`, `movie`, `series`, `drama`, `anime`, `adult` |
 | `limit` | integer | `24` | Page size, `1`–`100` |
 | `offset` | integer | `0` | Number of matches to skip |
-| `scope` | enum | `catalog` | `catalog` = whole-server index; `site` = MovieLinkBD's own `/search` page (25 results, `q` required) |
+| `scope` | enum | `catalog` | `catalog` = whole-server index; `site` = MovieLinkBD's own `/search` page (25 results, `q` required); `db` = the Supabase mirror (`mlbd_titles`), which works from any host |
 
 `category=adult` maps to the site's `download18plus` type. `all` includes adult
 titles; filter them out client-side via each result's `adult` flag if needed.
@@ -136,6 +136,9 @@ curl "http://localhost:8000/search?q=slime&category=anime&limit=5"
 - `total` is the full match count for the query + category, so
   `results.length < total` means more pages exist.
 - `scope=site` requires a non-empty `q` and ignores `category`/`offset`
+- `scope=db` reads the Supabase mirror and returns `"source": "db"`; the default
+  `catalog` scope falls back to the mirror automatically when MovieLinkBD blocks
+  this host's IP
   (it returns up to `limit` rows from the site's 25-result page).
 - Pass a result's `url` to `/scrape` to get its streams.
 

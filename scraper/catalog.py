@@ -102,7 +102,7 @@ class CatalogResults(BaseModel):
     total: int = Field(0, description="Total matching titles")
     limit: int = 24
     offset: int = 0
-    source: Literal["catalog", "site"] = "catalog"
+    source: Literal["catalog", "site", "db"] = "catalog"
     catalog_count: int | None = Field(
         None, description="Number of titles in the loaded catalogue index"
     )
@@ -446,6 +446,12 @@ async def ensure_catalog(force: bool = False) -> int:
     """Load (and cache) the catalogue index; return the number of titles."""
     state = await _load_state(force=force)
     return state.count
+
+
+async def catalog_rows() -> tuple[str | None, list[list]]:
+    """Return the catalogue version and its raw ``[title, slug, …]`` rows."""
+    state = await _load_state()
+    return state.version, list(state.rows)
 
 
 async def catalog_stats() -> dict:

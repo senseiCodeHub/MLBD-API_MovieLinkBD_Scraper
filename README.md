@@ -84,13 +84,17 @@ iframe, and never runs its click scripts.
 │   ├── search.py            # the site's own 25-result search (scope=site)
 │   ├── downloads.py         # legacy data-dl decoder (browser fallback)
 │   ├── browser.py           # Playwright fallback
+│   ├── store.py             # Supabase mirror: titles, scrapes, links
 │   └── exceptions.py
 ├── web/                     # Next.js 14 frontend (Vercel-ready)
 │   ├── app/                 # home page, layout, styles
 │   ├── components/          # search, cards, episode list, icons
 │   └── lib/                 # API client, types, formatting
+├── scripts/
+│   └── serve-public.ps1     # local API + public tunnel URL
 ├── docs/
 │   ├── API.md               # full API reference
+│   ├── DATABASE.md          # Supabase mirror (local scraper → Postgres)
 │   └── DEPLOY-RENDER.md     # Render + Vercel deployment guide
 ├── Dockerfile               # API image with Playwright/Chromium
 ├── .dockerignore
@@ -152,6 +156,8 @@ npm run dev
 | `POST` | `/scrape` | JSON variant of `/scrape` |
 | `GET` | `/catalog/status` | Index version, title count and type counts |
 | `POST` | `/catalog/refresh` | Force a fresh shard crawl |
+| `POST` | `/catalog/sync` | Push the local index into Supabase |
+| `GET` | `/db/status` | Supabase mirror status and row counts |
 
 ```bash
 # Search
@@ -233,12 +239,36 @@ in-memory and instant.
 
 ---
 
+## Supabase mirror (run the scraper locally, serve from the database)
+
+Because only residential IPs reach MovieLinkBD, the scraper usually runs on a
+local machine. Everything it learns can be mirrored into Supabase, so a deployed
+API still answers searches and cached pages when the local machine is offline:
+
+```bash
+python -m scraper.store sync     # catalogue titles -> mlbd_titles
+python -m scraper.store stats    # row counts
+```
+
+Every successful `/scrape` also stores the page and all of its links. With
+`/search?scope=db` or an unreachable live catalogue, the API answers from the
+mirror and reports `"source": "db"`; `/scrape` falls back to a stored snapshot
+marked `"cached": true`.
+
+📖 **Details, schema and RLS: [`docs/DATABASE.md`](docs/DATABASE.md)**
+
+---
+
 ## Configuration
 
 | Variable | Where | Default | Purpose |
 | --- | --- | --- | --- |
 | `NEXT_PUBLIC_API_BASE` | web | `http://localhost:8000` | Backend URL used by the UI |
 | `MLBD_CACHE_DIR` | API | `~/.cache/mlbd` | Catalogue cache directory |
+| `SUPABASE_URL` | API | — | Supabase project URL (mirror) |
+| `SUPABASE_SERVICE_ROLE_KEY` | API | — | Key used to write titles, pages and links |
+| `SUPABASE_ANON_KEY` | API | — | Read-only key, used when no service key is set |
+| `MLBD_SCRAPE_CACHE_SECONDS` | API | `21600` | How long a stored scrape is served when the live site fails |
 | `PYTHON_VERSION` | deploy | — | Set to `3.11` on Render/Railway |
 
 ---

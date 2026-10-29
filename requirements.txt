@@ -6,3 +6,4 @@ httpx>=0.25.0
 m3u8>=3.9.0
 tenacity>=8.2.0
 loguru>=0.7.0
+python-dotenv>=1.0.0

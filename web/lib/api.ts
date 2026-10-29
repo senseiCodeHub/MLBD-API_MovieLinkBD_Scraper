@@ -65,6 +65,8 @@ export interface ScrapeDownload {
 
 export interface ScrapeResult {
   page_url: string;
+  cached?: boolean;
+  cache_age_seconds?: number;
   title: string | null;
   poster: string | null;
   content_type: string | null;
@@ -105,7 +107,7 @@ export interface SearchResultData {
   total: number;
   limit: number;
   offset: number;
-  source: "catalog" | "site";
+  source: "catalog" | "site" | "db";
   catalog_count: number | null;
   searched_at: string;
 }

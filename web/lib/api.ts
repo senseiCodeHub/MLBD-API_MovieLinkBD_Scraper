@@ -125,8 +125,16 @@ export interface CatalogStatus {
   age_seconds?: number;
 }
 
+// Production builds fall back to the deployed Render API, so the site works even
+// if NEXT_PUBLIC_API_BASE is not set in the hosting dashboard.
+const PRODUCTION_API_BASE =
+  "https://mlbd-api-movielinkbd-scraper.onrender.com";
+
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_BASE ||
+  (process.env.NODE_ENV === "production"
+    ? PRODUCTION_API_BASE
+    : "http://localhost:8000");
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {

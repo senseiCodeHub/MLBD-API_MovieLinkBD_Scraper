@@ -1,8 +1,4 @@
 {
-  "version": 2,
-  "builds": [{ "src": "package.json", "use": "@vercel/next" }],
-  "routes": [{ "src": "/(.*)", "dest": "/" }],
-  "env": {
-    "NEXT_PUBLIC_API_BASE": "@next_public_api_base"
-  }
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs"
 }

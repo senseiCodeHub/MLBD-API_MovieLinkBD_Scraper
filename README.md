@@ -90,7 +90,10 @@ iframe, and never runs its click scripts.
 │   ├── components/          # search, cards, episode list, icons
 │   └── lib/                 # API client, types, formatting
 ├── docs/
-│   └── API.md               # full API reference
+│   ├── API.md               # full API reference
+│   └── DEPLOY-RENDER.md     # Render + Vercel deployment guide
+├── Dockerfile               # API image with Playwright/Chromium
+├── .dockerignore
 ├── requirements.txt
 ├── render.yaml
 └── LICENSE
@@ -160,6 +163,9 @@ curl "http://localhost:8000/scrape?url=https%3A%2F%2Fmovielinkbd.tv%2Fanime%2Fth
 
 📖 **Full reference: [`docs/API.md`](docs/API.md)** — parameters, response
 schemas, error codes, data models, cache behaviour and client examples.
+
+🚀 **Deploy: [`docs/DEPLOY-RENDER.md`](docs/DEPLOY-RENDER.md)** — Render +
+Vercel walkthrough, free-plan limits and troubleshooting.
 
 ---
 
@@ -241,13 +247,23 @@ in-memory and instant.
 
 ### API (Render / Railway / Fly.io)
 
-1. Push the repo and create a Python web service.
-2. Start command: `uvicorn api.main:app --host 0.0.0.0 --port $PORT`
-3. Install step: `pip install -r requirements.txt && playwright install chromium`
-4. Persist `~/.cache/mlbd` (or set `MLBD_CACHE_DIR`) so the index survives
-   restarts. Without a disk, the API re-crawls on cold start (~15 s).
+The repo includes a `Dockerfile` that installs Python dependencies **and**
+Chromium, so the Playwright fallback works on any container host.
 
-`render.yaml` is included as a starting point.
+**Render (recommended, one click):** see the step-by-step
+[Render deployment guide](docs/DEPLOY-RENDER.md). The included `render.yaml`
+creates a Docker web service with a `/health` check and a free-plan default.
+
+Manual settings:
+
+1. Push the repo and create a **Docker** web service.
+2. Dockerfile: `./Dockerfile`
+3. Start command (already in the image):
+   `uvicorn api.main:app --host 0.0.0.0 --port $PORT`
+4. Health check: `/health`
+5. Persist `~/.cache/mlbd` (or set `MLBD_CACHE_DIR=/var/data/mlbd` with a
+   mounted disk) so the index survives restarts. Without a disk, the API
+   re-crawls on cold start (~15 s).
 
 ### Web (Vercel)
 

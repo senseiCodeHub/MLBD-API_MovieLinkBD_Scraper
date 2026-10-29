@@ -43,6 +43,8 @@ async def browser_context(headless: bool = True) -> AsyncIterator[BrowserContext
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
+                # Containers (Render, Docker) often have a tiny /dev/shm.
+                "--disable-dev-shm-usage",
             ],
         )
         context: BrowserContext = await browser.new_context(

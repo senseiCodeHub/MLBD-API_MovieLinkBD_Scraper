@@ -1,10 +1,28 @@
-name: "mlbd-scraper"
+# Render Blueprint for the MovieLinkBD scraper API.
+# The Next.js frontend is deployed separately (Vercel or a Render Static Site).
+#
+# Docker is used so Playwright/Chromium and its system libraries are always
+# available, including the headless-browser fallback path.
 services:
   - type: web
     name: mlbd-scraper-api
-    env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11"
+      - key: MLBD_CACHE_DIR
+        value: /var/data/mlbd
+
+    # Persistent catalogue cache (requires a paid instance type).
+    # Free instances keep the cache in the container filesystem, so it is lost
+    # on every deploy/restart and the index is re-crawled on cold start.
+    # Uncomment on Starter or higher:
+    #
+    # disk:
+    #   name: mlbd-cache
+    #   mountPath: /var/data
+    #   sizeGB: 1

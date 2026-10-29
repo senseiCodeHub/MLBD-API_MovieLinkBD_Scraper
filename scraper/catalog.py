@@ -34,7 +34,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .browser import USER_AGENT
-from .exceptions import ScraperError
+from .exceptions import CloudflareBlocked, ScraperError
 
 BASE_URL = "https://movielinkbd.tv"
 MANIFEST_PATH = "/search-suggest/manifest"
@@ -226,20 +226,48 @@ def _to_item(row: list) -> CatalogItem:
     )
 
 
-async def _get_json(client: httpx.AsyncClient, url: str) -> object:
+_CHALLENGE_MARKERS = ("just a moment", "challenge-platform", "cf-chl")
+
+
+def _looks_like_challenge(response: httpx.Response) -> bool:
+    """True when the response is a Cloudflare challenge (IP/ASN based)."""
+    if response.headers.get("cf-mitigated"):
+        return True
+    if response.status_code not in (403, 429, 503):
+        return False
+    head = response.text[:4000].lower()
+    return any(marker in head for marker in _CHALLENGE_MARKERS)
+
+
+async def _get_json(
+    client: httpx.AsyncClient, url: str, *, strict: bool = False
+) -> object:
     last: Exception | None = None
+    challenge = False
     for attempt in range(3):
         try:
             response = await client.get(url)
             if response.status_code == 404:
                 return []
+            if _looks_like_challenge(response):
+                challenge = True
+                last = f"HTTP {response.status_code} Cloudflare challenge"
+                break
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError, ValueError) as exc:  # noqa: PERF203
             last = exc
             if attempt < 2:
                 await asyncio.sleep(0.6 * (attempt + 1))
-    logger.debug("Catalog request failed for {}: {}", url, last)
+    logger.warning("Catalog request failed for {}: {}", url, last)
+    if strict and challenge:
+        raise CloudflareBlocked(
+            "MovieLinkBD is blocking this server's IP with a Cloudflare "
+            "challenge, so the scraper cannot read the catalogue. Cloud and "
+            "datacentre IPs are challenged; the API works from a residential "
+            "connection. Run the API from such a network (or tunnel it) and "
+            "point the UI at that URL."
+        )
     return []
 
 
@@ -255,10 +283,13 @@ async def _fetch_manifest(client: httpx.AsyncClient, force: bool = False) -> dic
 
     bucket = int(now // 30000)
     data = await _get_json(
-        client, f"{BASE_URL}{MANIFEST_PATH}?r={bucket}"
+        client, f"{BASE_URL}{MANIFEST_PATH}?r={bucket}", strict=True
     )
     if not isinstance(data, dict) or not data.get("v") or not data.get("ready"):
-        raise ScraperError("MovieLinkBD catalogue manifest is not ready")
+        raise ScraperError(
+            "MovieLinkBD catalogue manifest is not ready "
+            "(the site returned an unexpected response)"
+        )
 
     _manifest_cache = (now, data)
     return data

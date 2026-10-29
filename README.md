@@ -254,6 +254,12 @@ Chromium, so the Playwright fallback works on any container host.
 [Render deployment guide](docs/DEPLOY-RENDER.md). The included `render.yaml`
 creates a Docker web service with a `/health` check and a free-plan default.
 
+> **Host IP matters.** MovieLinkBD challenges cloud/datacentre IPs, so on Render
+> the API starts but every search returns `CloudflareBlocked`. Keep the API on a
+> residential connection and expose it with
+> `scripts/serve-public.ps1` — see
+> [Cloud IPs are challenged](docs/DEPLOY-RENDER.md#cloud-ips-are-challenged-known-limitation).
+
 Manual settings:
 
 1. Push the repo and create a **Docker** web service.

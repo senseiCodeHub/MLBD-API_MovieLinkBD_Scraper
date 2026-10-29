@@ -202,6 +202,10 @@ fallback failures return an error instead of a wrong result.
 MovieLinkBD served a challenge to the datacenter IP. The API deliberately does
 not bypass it. Retry later; a different region/instance may help.
 
+If **every** request fails this way and `/catalog/status` stays `{"loaded":
+false}`, the site is challenging the host's IP range rather than a random
+challenge — see [Cloud IPs are challenged](#cloud-ips-are-challenged-known-limitation).
+
 ### 502 / request timeout
 
 Free cold start or a long scrape. Retry, and use `probe=false` for faster
@@ -222,6 +226,45 @@ Then check `/catalog/status` again.
 
 `NEXT_PUBLIC_API_BASE` was missing at build time. Set it in Vercel and redeploy
 the frontend.
+
+---
+
+## Cloud IPs are challenged (known limitation)
+
+MovieLinkBD sits behind Cloudflare and returns `Just a moment...` to cloud and
+datacentre IP ranges. On Render (and Railway, Fly.io, Vercel, any VPS in a
+DC range) every upstream request is challenged, so the API answers:
+
+| Call | Result |
+| --- | --- |
+| `GET /health` | `200` — the container itself is fine |
+| `GET /catalog/status` | `{"loaded": false}` |
+| `GET /search?q=x` | `CloudflareBlocked` |
+
+The same requests succeed from a normal residential connection (e.g. a home BD
+line), which is why local development works while the deployment does not. This
+is an IP rule on MovieLinkBD's side; no header, retry or region change fixes it.
+
+**Working setup:** keep the API on a network the site serves and give it a
+public URL with a tunnel.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/serve-public.ps1
+```
+
+The script starts `uvicorn` on port 8000 and opens a Cloudflare quick tunnel,
+then prints the public URL, for example:
+
+```
+Public API: https://<random-words>.trycloudflare.com
+```
+
+Set that as `NEXT_PUBLIC_API_BASE` on Vercel and redeploy the frontend. The
+quick-tunnel URL changes on every run, so repeat both steps when you restart
+it. For a stable hostname, create a named Cloudflare Tunnel on a domain you own
+(`cloudflared tunnel create mlbd`), or run the API on a residential/BD VPS, and
+point `NEXT_PUBLIC_API_BASE` at that instead. The machine must stay on while
+the deployed UI is in use.
 
 ---
 

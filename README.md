@@ -40,6 +40,7 @@ iframe, and never runs its click scripts.
 | 🧩 **Every server/quality** | `1080p`/`720p`/`480p`, `mkv`/`mp4`/`webm`/`hls`, audio languages, codec, HEVC flag, size and MIME type. |
 | ⬇️ **Downloads** | Direct file links plus the site's `/file/<token>` pages, labelled with episode, quality and size. |
 | 🖥️ **Polished web UI** | Dark cinematic Next.js app with poster cards, category tabs, copy buttons, a JSON view and mobile support. |
+| 💾 **Local library** | One click saves every title's episodes, streams and downloads to SQLite (`data/library.db`) — then browse it offline in the **Library** tab. |
 | ⚡ **FastAPI backend** | Typed endpoints, CORS enabled, automatic OpenAPI docs at `/docs`. |
 | 🛡️ **No ad-gate automation** | Data is decoded from the page's embedded payload; ad/unlock steps are left alone. |
 
@@ -76,9 +77,11 @@ iframe, and never runs its click scripts.
 ```
 .
 ├── api/
-│   └── main.py              # FastAPI app: /search, /scrape, /catalog/*
+│   ├── main.py              # FastAPI app: /search, /scrape, /catalog/*
+│   └── library.py           # /library endpoints + background bulk sync
 ├── scraper/
 │   ├── catalog.py           # whole-catalogue index + disk cache
+│   ├── library.py           # SQLite library: titles, episodes, sources, downloads
 │   ├── scraper.py           # payload decode, per-episode extraction, probing
 │   ├── models.py            # Episode / EpisodeSource / ScrapeResult
 │   ├── search.py            # the site's own 25-result search (scope=site)
@@ -136,6 +139,11 @@ NEXT_PUBLIC_API_BASE=http://localhost:8000 npm run dev
 
 Open <http://localhost:3000>.
 
+Switch to the **Library** tab and press **Save all titles** to scrape the whole
+catalogue into `data/library.db` (override with `MLBD_DB_PATH`). The job runs in
+the background with progress, ETA, cancel and resume; already-saved titles are
+skipped unless you enable re-scraping. Use the **Limit** field for a quick test.
+
 On Windows PowerShell:
 
 ```powershell
@@ -143,6 +151,12 @@ cd web
 $env:NEXT_PUBLIC_API_BASE = "http://localhost:8000"
 npm run dev
 ```
+
+**One click (Windows):** double-click [`start-local.bat`](start-local.bat) — it
+checks dependencies, starts the API and the UI in two windows, waits for both
+and opens the browser. `start-local.bat nobrowser` skips the browser. Ports are
+picked automatically (8000 for the API, 4300 for the UI, next free one if a port
+is reserved or busy) and `web/.env.local` is pointed at the API for you.
 
 ---
 
@@ -158,6 +172,12 @@ npm run dev
 | `POST` | `/catalog/refresh` | Force a fresh shard crawl |
 | `POST` | `/catalog/sync` | Push the local index into Supabase |
 | `GET` | `/db/status` | Supabase mirror status and row counts |
+| `GET` | `/library?q=&category=&status=` | Search titles saved in the local SQLite library |
+| `GET` | `/library/{id}` | One saved title with every episode, source and download |
+| `GET` | `/library/stats` | Database size, row counts and sync progress |
+| `POST` | `/library/sync` | Start the one-click bulk save |
+| `GET` | `/library/sync/status` | Progress, ETA and current title |
+| `POST` | `/library/sync/cancel` | Stop the running bulk save |
 
 ```bash
 # Search
@@ -165,6 +185,11 @@ curl "http://localhost:8000/search?q=slime&category=anime&limit=5"
 
 # Every episode of the first match
 curl "http://localhost:8000/scrape?url=https%3A%2F%2Fmovielinkbd.tv%2Fanime%2Fthat-time-i-got-reincarnated-as-a-slime&probe=false"
+
+# Save the first 5 anime titles to the local library
+curl -X POST http://localhost:8000/library/sync \
+  -H "Content-Type: application/json" \
+  -d '{"category":"anime","limit":5}'
 ```
 
 📖 **Full reference: [`docs/API.md`](docs/API.md)** — parameters, response
@@ -239,10 +264,78 @@ in-memory and instant.
 
 ---
 
-## Supabase mirror (run the scraper locally, serve from the database)
+## Local library & one-click bulk save
+
+The **Library** tab turns the scraper into a local catalogue. Press **Save all
+titles** once and a background job walks every catalogue entry, stores the full
+payload in SQLite, and lets you browse it without touching MovieLinkBD again.
+
+```
+web Library tab ──POST /library/sync──▶ FastAPI background job
+                                            │ scrape each title
+                                            ▼
+                              data/library.db (SQLite)
+                                titles · episodes
+                                sources · downloads
+                                            │ optional
+                                            ▼
+                                    Supabase mirror
+```
+
+- **Resume:** titles already `saved` are skipped. Enable *Re-scrape saved titles*
+  to refresh them.
+- **Streams only:** a page that exposes downloads but no playable stream is
+  stored as `empty` instead of `saved`, so the library keeps only real stream
+  links. Use *Retry no-stream titles* to try those pages again later.
+- **Progress:** live counts, current title, rate and ETA; the job keeps running
+  if you close the tab.
+- **Cancel:** stops after the in-flight titles finish.
+- **Safety:** the job aborts after 10 consecutive failures instead of hammering
+  the site, and `probe=false` avoids a HEAD request per stream URL.
+- **Test first:** set **Limit** to `5` (or pass `"limit": 5` to the API) before
+  starting the full ~14k-title run. At the default concurrency a full run takes
+  a few hours.
+
+The SQLite schema is deliberately small:
+
+| Table | Contents |
+| --- | --- |
+| `titles` | One row per catalogue title, status (`pending`/`saved`/`empty`/`failed`), counts and the raw JSON |
+| `episodes` | Season/number/label for each episode of a title |
+| `sources` | Stream URL, quality, audio, codec, size and download URL per episode |
+| `downloads` | Every download link, including ones without a playable stream |
+
+Browse it from the UI or query it directly:
+
+```bash
+curl "http://localhost:8000/library?q=slime&status=saved"
+curl "http://localhost:8000/library/1"
+curl "http://localhost:8000/library/stats"
+```
+
+If `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD` and `MYSQL_DATABASE` are configured,
+the same payload is mirrored to the tables in [`docs/DATABASE.md`](docs/DATABASE.md).
+Without MySQL configured the UI shows **Local only** and saves locally.
+
+To enable the mirror, copy MySQL credentials into `.env` and restart the API:
+
+```ini
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=<your-password>
+MYSQL_DATABASE=mlbd
+```
+
+Keep `MYSQL_PASSWORD` server-side only — never put it in `web/.env.local` or
+commit it.
+
+---
+
+## MySQL mirror (run the scraper locally, serve from the database)
 
 Because only residential IPs reach MovieLinkBD, the scraper usually runs on a
-local machine. Everything it learns can be mirrored into Supabase, so a deployed
+local machine. Everything it learns can be mirrored into MySQL, so a deployed
 API still answers searches and cached pages when the local machine is offline:
 
 ```bash
@@ -255,7 +348,7 @@ Every successful `/scrape` also stores the page and all of its links. With
 mirror and reports `"source": "db"`; `/scrape` falls back to a stored snapshot
 marked `"cached": true`.
 
-📖 **Details, schema and RLS: [`docs/DATABASE.md`](docs/DATABASE.md)**
+📖 **Details and schema: [`docs/DATABASE.md`](docs/DATABASE.md)**
 
 ---
 
@@ -265,9 +358,12 @@ marked `"cached": true`.
 | --- | --- | --- | --- |
 | `NEXT_PUBLIC_API_BASE` | web | `http://localhost:8000` | Backend URL used by the UI |
 | `MLBD_CACHE_DIR` | API | `~/.cache/mlbd` | Catalogue cache directory |
-| `SUPABASE_URL` | API | — | Supabase project URL (mirror) |
-| `SUPABASE_SERVICE_ROLE_KEY` | API | — | Key used to write titles, pages and links |
-| `SUPABASE_ANON_KEY` | API | — | Read-only key, used when no service key is set |
+| `MLBD_DB_PATH` | API | `data/library.db` | SQLite library file |
+| `MYSQL_HOST` | API | `localhost` | MySQL host |
+| `MYSQL_PORT` | API | `3306` | MySQL port |
+| `MYSQL_USER` | API | `root` | MySQL user |
+| `MYSQL_PASSWORD` | API | — | MySQL password |
+| `MYSQL_DATABASE` | API | `mlbd` | MySQL database name |
 | `MLBD_SCRAPE_CACHE_SECONDS` | API | `21600` | How long a stored scrape is served when the live site fails |
 | `PYTHON_VERSION` | deploy | — | Set to `3.11` on Render/Railway |
 

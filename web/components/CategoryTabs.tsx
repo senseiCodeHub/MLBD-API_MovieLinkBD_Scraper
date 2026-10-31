@@ -36,10 +36,10 @@ export function CategoryTabs({
           disabled={disabled}
           onClick={() => onChange(tab.value)}
           className={cx(
-            "rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
+            "rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60",
             value === tab.value
               ? "border-amber/50 bg-amber/10 text-amber-soft"
-              : "border-line bg-surface text-muted hover:border-line-strong hover:text-ink"
+              : "border-line bg-panel text-muted hover:border-line-strong hover:text-ink"
           )}
         >
           {tab.label}

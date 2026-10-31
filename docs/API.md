@@ -24,6 +24,7 @@ for any title.
 - [POST /scrape](#post-scrape)
 - [GET /catalog/status](#get-catalogstatus)
 - [POST /catalog/refresh](#post-catalogrefresh)
+- [Library & bulk sync](#library--bulk-sync)
 - [Data models](#data-models)
 - [Errors](#errors)
 - [Catalogue cache](#catalogue-cache)
@@ -348,6 +349,198 @@ curl -X POST http://localhost:8000/catalog/refresh
 
 Returns **HTTP 503** with `{"detail": "..."}` if the crawl fails or exceeds the
 120-second search budget.
+
+---
+
+## Library & bulk sync
+
+The local library is a SQLite file (default `data/library.db`, override with
+`MLBD_DB_PATH`). It stores every scraped title, episode, stream source and
+download link, so the UI can browse them without hitting MovieLinkBD again.
+
+### GET /library
+
+Search titles already stored in the library.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `q` | `""` | Title/slug fragment |
+| `category` | `all` | `all`, `movie`, `series`, `drama`, `anime`, `adult` |
+| `status` | `saved` | `all`, `saved` (has streams), `empty` (no stream links), `pending`, `failed` |
+| `limit` | `24` | Page size (1–100) |
+| `offset` | `0` | Pagination offset |
+
+```bash
+curl "http://localhost:8000/library?q=slime&status=saved&limit=5"
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "query": "slime",
+    "category": "all",
+    "status": "saved",
+    "results": [
+      {
+        "id": 1,
+        "key": "anime:that-time-i-got-reincarnated-as-a-slime",
+        "slug": "that-time-i-got-reincarnated-as-a-slime",
+        "type": "anime",
+        "category": "anime",
+        "title": "That Time I Got Reincarnated as a Slime",
+        "year": "2018",
+        "poster": "https://...",
+        "adult": false,
+        "status": "saved",
+        "episode_count": 24,
+        "source_count": 72,
+        "download_count": 72,
+        "scraped_at": "2026-10-30T10:15:05+00:00"
+      }
+    ],
+    "total": 1,
+    "limit": 5,
+    "offset": 0
+  },
+  "error": null,
+  "error_type": null
+}
+```
+
+### GET /library/{id}
+
+Return one saved title with its full `episodes[]`, `sources[]` and
+`downloads[]` — the same shapes as `ScrapeResult`, plus `id`, `key`, `status`,
+`saved_at` and `error`.
+
+```bash
+curl http://localhost:8000/library/1
+```
+
+Returns **HTTP 404** when the id does not exist.
+
+### GET /library/stats
+
+Database path, row counts, file size, sync progress and mirror capability.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "db_path": "C:\\...\\data\\library.db",
+    "titles": { "total": 14127, "saved": 812, "pending": 13315, "failed": 0, "empty": 3 },
+    "episodes": 9214,
+    "sources": 24190,
+    "downloads": 23880,
+    "size_bytes": 52428800,
+    "mysql": true,
+    "mysql_writable": true,
+    "sync": { "running": true, "processed": 812, "total": 14127, "saved": 809, "failed": 0, "empty": 3, "skipped": 0, "mirrored": 809, "mirror_failed": 0, "percent": 5.75, "eta_seconds": 7200 }
+  },
+  "error": null,
+  "error_type": null
+}
+```
+
+`mysql_writable` is `false` when MySQL is not configured or the connection
+cannot write.
+Reads still work, but the sync will skip mirroring.
+Add `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD` and `MYSQL_DATABASE` to `.env`
+to enable mirroring.
+
+`titles.empty` counts pages that exposed downloads but no playable stream. They
+are hidden from the default `status=saved` view and can be retried with
+`retry_empty=true`.
+
+### POST /library/sync
+
+Start the background job that scrapes every catalogue title and saves it.
+
+```json
+{
+  "category": "all",
+  "include_adult": true,
+  "force": false,
+  "probe": false,
+  "concurrency": 3,
+  "mirror": true,
+  "limit": null,
+  "require_streams": true,
+  "retry_empty": false
+}
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `category` | `all` | Restrict the job to one category |
+| `include_adult` | `true` | Include `download18plus` titles |
+| `force` | `false` | Re-scrape titles already saved |
+| `probe` | `false` | HEAD each stream URL for size (much slower) |
+| `concurrency` | `3` | Titles scraped in parallel (1–8) |
+| `mirror` | `true` | Also write to Supabase when a service-role key is configured |
+| `limit` | `null` | Stop after N titles — useful for testing |
+| `require_streams` | `true` | Only mark a title `saved` when it exposes at least one playable stream; otherwise store it as `empty` |
+| `retry_empty` | `false` | Re-scrape titles that previously returned no stream links |
+
+```bash
+curl -X POST http://localhost:8000/library/sync \
+  -H "Content-Type: application/json" \
+  -d '{"category":"anime","limit":5,"probe":false}'
+```
+
+Returns the current sync state. A second request while a job is running returns
+**HTTP 409**.
+
+The job:
+
+- seeds the catalogue into `titles` as `pending`;
+- skips rows already `saved` (and `empty` rows, unless `retry_empty=true`)
+  unless `force=true`;
+- stores a page with downloads but no playable stream as `empty` when
+  `require_streams=true`, so a later run can retry it;
+- records failures per title without stopping;
+- aborts after **10 consecutive failures** to avoid hammering the site;
+- writes to SQLite first, then mirrors stream-bearing payloads to Supabase.
+
+### GET /library/sync/status
+
+Progress snapshot for polling (the UI polls every 1.5 s).
+
+```json
+{
+  "ok": true,
+  "data": {
+    "running": true,
+    "cancelling": false,
+    "total": 14127,
+    "processed": 812,
+    "saved": 810,
+    "failed": 2,
+    "empty": 1,
+    "skipped": 0,
+    "mirrored": 810,
+    "mirror_failed": 0,
+    "percent": 5.75,
+    "current": "That Time I Got Reincarnated as a Slime",
+    "eta_seconds": 7200,
+    "rate_per_minute": 6.4,
+    "started_at": "2026-10-30T10:15:02+00:00",
+    "finished_at": null,
+    "message": "Scraping 13315 titles"
+  },
+  "error": null,
+  "error_type": null
+}
+```
+
+### POST /library/sync/cancel
+
+Ask the job to stop. In-flight titles finish, then the job exits.
+
+```bash
+curl -X POST http://localhost:8000/library/sync/cancel
+```
 
 ---
 

@@ -20,6 +20,12 @@ yarn-error.log*
 .env.local
 .env*.local
 
+# Local library database (SQLite + WAL files)
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # OS / editor
 .DS_Store
 Thumbs.db

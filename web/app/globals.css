@@ -14,20 +14,21 @@
   body {
     @apply bg-canvas font-sans text-ink antialiased;
     background-image: radial-gradient(
-      60% 38% at 50% 0%,
-      rgb(245 165 36 / 0.06),
-      transparent 72%
+      60% 40% at 50% 0%,
+      rgb(245 165 36 / 0.05),
+      transparent 70%
     );
     background-repeat: no-repeat;
+    background-attachment: fixed;
   }
 
   ::selection {
-    background-color: rgb(245 165 36 / 0.3);
+    background-color: rgb(245 165 36 / 0.35);
     color: #fff8ec;
   }
 
   :where(a, button, input, [tabindex]):focus-visible {
-    @apply outline-none ring-2 ring-amber/70 ring-offset-2 ring-offset-canvas;
+    @apply outline-none ring-2 ring-amber/80 ring-offset-2 ring-offset-canvas;
   }
 
   input::placeholder {

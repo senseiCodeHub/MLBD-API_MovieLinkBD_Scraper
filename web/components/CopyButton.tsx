@@ -47,7 +47,7 @@ export function CopyButton({ value, label, className }: CopyButtonProps) {
       title={copied ? "Copied" : `Copy ${label ?? "value"}`}
       aria-label={copied ? "Copied to clipboard" : `Copy ${label ?? "value"}`}
       className={cx(
-        "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-xs font-medium transition-colors duration-150",
+        "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-xl border px-2 text-xs font-medium transition-colors duration-200",
         label ? "min-w-[4.5rem]" : "w-8",
         copied
           ? "border-mint/30 bg-mint/10 text-mint"

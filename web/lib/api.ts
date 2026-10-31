@@ -86,6 +86,77 @@ export interface ScrapeResponse {
   error_type: string | null;
 }
 
+export interface CompareResponse {
+  ok: boolean;
+  data: {
+    page_url: string;
+    stored: ScrapeResult | null;
+    live: ScrapeResult;
+    diff: {
+      page_url: string;
+      title: { stored: unknown; live: unknown; changed: boolean };
+      poster: { stored: unknown; live: unknown; changed: boolean };
+      category: { stored: unknown; live: unknown; changed: boolean };
+      completed: { stored: unknown; live: unknown; changed: boolean };
+      adult: { stored: unknown; live: unknown; changed: boolean };
+      episodes: {
+        added: Array<{
+          label: string;
+          number: number | null;
+          season: number | null;
+          status: string;
+          sources_added: unknown[];
+          sources_removed: unknown[];
+          sources_changed: unknown[];
+          downloads_added: unknown[];
+          downloads_removed: unknown[];
+          downloads_changed: unknown[];
+        }>;
+        removed: Array<{
+          label: string;
+          number: number | null;
+          season: number | null;
+          status: string;
+          sources_added: unknown[];
+          sources_removed: unknown[];
+          sources_changed: unknown[];
+          downloads_added: unknown[];
+          downloads_removed: unknown[];
+          downloads_changed: unknown[];
+        }>;
+        changed: Array<{
+          label: string;
+          number: number | null;
+          season: number | null;
+          status: string;
+          sources_added: unknown[];
+          sources_removed: unknown[];
+          sources_changed: unknown[];
+          downloads_added: unknown[];
+          downloads_removed: unknown[];
+          downloads_changed: unknown[];
+        }>;
+        same: number;
+        added_count: number;
+        removed_count: number;
+        changed_count: number;
+      };
+      sources: {
+        added_total: number;
+        removed_total: number;
+        changed_total: number;
+      };
+      downloads: {
+        added_total: number;
+        removed_total: number;
+        changed_total: number;
+      };
+    };
+  } | null;
+  error: string | null;
+  error_type: string | null;
+}
+
 export interface SearchItem {
   title: string;
   url: string;
@@ -160,6 +231,19 @@ export function scrapeUrl(url: string, probe = true): Promise<ScrapeResponse> {
   );
 }
 
+export function compareUrl(
+  url: string,
+  probe = true
+): Promise<CompareResponse | null> {
+  const params = new URLSearchParams({
+    url,
+    probe: probe ? "true" : "false",
+  });
+  return requestJson<CompareResponse>(`/compare?${params.toString()}`, {
+    method: "POST",
+  }).then((envelope) => envelope.data);
+}
+
 export function searchContent(
   query: string,
   options: {
@@ -183,4 +267,205 @@ export function searchContent(
     scope,
   });
   return getJson<SearchResponse>(`/search?${params.toString()}`);
+}
+
+// ---------------------------------------------------------------------------
+// Local library + one-click catalogue sync
+// ---------------------------------------------------------------------------
+
+export type LibraryStatus = "all" | "saved" | "pending" | "failed" | "empty";
+
+export interface ApiEnvelope<T> {
+  ok: boolean;
+  data: T | null;
+  error: string | null;
+  error_type: string | null;
+}
+
+export interface SyncStatus {
+  running: boolean;
+  cancelling: boolean;
+  total: number;
+  processed: number;
+  saved: number;
+  failed: number;
+  empty: number;
+  skipped: number;
+  percent: number;
+  current: string | null;
+  eta_seconds: number | null;
+  rate_per_minute: number;
+  started_at: string | null;
+  finished_at: string | null;
+  message: string | null;
+}
+
+export interface LibraryStats {
+  db_path: string;
+  titles: {
+    total: number;
+    saved: number;
+    pending: number;
+    failed: number;
+    empty: number;
+  };
+  episodes: number;
+  sources: number;
+  downloads: number;
+  size_bytes: number;
+  mysql: boolean;
+  mysql_writable: boolean;
+  sync: SyncStatus;
+}
+
+export interface LibraryItem {
+  page_url: string;
+  slug: string;
+  type: string;
+  category: Category;
+  title: string;
+  year: string | null;
+  poster: string | null;
+  adult: boolean;
+  status: "saved" | "pending" | "failed" | "empty";
+  content_type: string | null;
+  completed: boolean | null;
+  error: string | null;
+  scraped_at: string | null;
+  updated_at: string;
+  saved_at: string | null;
+}
+
+export interface LibrarySearchData {
+  query: string;
+  category: CatalogCategory;
+  status: LibraryStatus;
+  results: LibraryItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface LibraryTitle extends LibraryItem {
+  page_url: string;
+  episodes: Episode[];
+  sources: ScrapeSource[];
+  downloads: ScrapeDownload[];
+  saved_at: string;
+}
+
+export interface SyncOptions {
+  category?: CatalogCategory;
+  include_adult?: boolean;
+  force?: boolean;
+  probe?: boolean;
+  concurrency?: number;
+  limit?: number | null;
+  require_streams?: boolean;
+  retry_empty?: boolean;
+}
+
+async function requestJson<T>(
+  path: string,
+  init?: RequestInit
+): Promise<ApiEnvelope<T>> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    cache: "no-store",
+    ...init,
+  });
+
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok) {
+    const detail =
+      body && typeof body === "object" && "detail" in body
+        ? String((body as { detail: unknown }).detail)
+        : `HTTP ${res.status}`;
+    throw new Error(detail);
+  }
+
+  return body as ApiEnvelope<T>;
+}
+
+function unwrap<T>(envelope: ApiEnvelope<T>): T {
+  if (!envelope.ok || envelope.data === null) {
+    throw new Error(envelope.error || "The API returned an empty response");
+  }
+  return envelope.data;
+}
+
+export async function getLibraryStats(): Promise<LibraryStats> {
+  return unwrap(await requestJson<LibraryStats>("/library/stats"));
+}
+
+export async function getSyncStatus(): Promise<SyncStatus> {
+  return unwrap(await requestJson<SyncStatus>("/library/sync/status"));
+}
+
+export async function startLibrarySync(
+  options: SyncOptions = {}
+): Promise<SyncStatus> {
+  const payload = {
+    category: options.category ?? "all",
+    include_adult: options.include_adult ?? true,
+    force: options.force ?? false,
+    probe: options.probe ?? false,
+    concurrency: options.concurrency ?? 3,
+    limit: options.limit ?? null,
+    require_streams: options.require_streams ?? true,
+    retry_empty: options.retry_empty ?? false,
+  };
+  return unwrap(
+    await requestJson<SyncStatus>("/library/sync", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+  );
+}
+
+export async function cancelLibrarySync(): Promise<SyncStatus> {
+  return unwrap(
+    await requestJson<SyncStatus>("/library/sync/cancel", { method: "POST" })
+  );
+}
+
+export async function searchLibrary(
+  query = "",
+  options: {
+    category?: CatalogCategory;
+    status?: LibraryStatus;
+    limit?: number;
+    offset?: number;
+  } = {}
+): Promise<LibrarySearchData> {
+  const {
+    category = "all",
+    status = "saved",
+    limit = 24,
+    offset = 0,
+  } = options;
+  const params = new URLSearchParams({
+    q: query,
+    category,
+    status,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return unwrap(
+    await requestJson<LibrarySearchData>(`/library?${params.toString()}`)
+  );
+}
+
+export async function getLibraryTitle(page_url: string): Promise<LibraryTitle> {
+  return unwrap(
+    await requestJson<LibraryTitle>(
+      `/library/${encodeURIComponent(page_url)}`
+    )
+  );
 }

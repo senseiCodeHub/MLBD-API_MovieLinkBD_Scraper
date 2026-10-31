@@ -60,14 +60,14 @@ export function JsonViewer({ data }: { data: unknown }) {
   const tokens = useMemo(() => tokenize(json), [json]);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-line bg-surface">
-      <div className="flex items-center justify-between gap-3 border-b border-line bg-panel/60 px-4 py-2.5">
+    <div className="overflow-hidden rounded-2xl border border-line bg-surface">
+      <div className="flex items-center justify-between gap-3 border-b border-line bg-panel px-5 py-2.5">
         <span className="font-mono text-[11px] uppercase tracking-widest text-faint">
           response.json
         </span>
         <CopyButton value={json} label="Copy JSON" />
       </div>
-      <pre className="max-h-[30rem] overflow-auto p-4 font-mono text-xs leading-relaxed">
+      <pre className="max-h-[32rem] overflow-auto p-5 font-mono text-xs leading-relaxed">
         <code>
           {tokens.map((token, index) => (
             <span key={index} className={KIND_CLASS[token.kind]}>

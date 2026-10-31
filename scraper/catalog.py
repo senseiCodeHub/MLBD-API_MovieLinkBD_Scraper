@@ -454,6 +454,19 @@ async def catalog_rows() -> tuple[str | None, list[list]]:
     return state.version, list(state.rows)
 
 
+async def catalog_items(
+    category: CatalogCategory = "all",
+) -> list[CatalogItem]:
+    """Return every catalogue entry, optionally filtered by category."""
+    _, rows = await catalog_rows()
+    allowed = _CATEGORY_TYPES.get(category)
+    return [
+        _to_item(row)
+        for row in rows
+        if allowed is None or row[3] in allowed
+    ]
+
+
 async def catalog_stats() -> dict:
     """Return lightweight status information about the loaded index."""
     if _state is None:

@@ -163,6 +163,24 @@ A cached index loads instantly; a cold crawl takes ~10–20 seconds.
 
 ---
 
+## Local library on Render
+
+The **Library → Save all titles** job writes to SQLite at `MLBD_DB_PATH`
+(default `data/library.db`). On a free instance that file lives in the
+container filesystem and is lost on every deploy or restart, and the 512 MB
+plan is not sized for a full ~14k-title scrape.
+
+For the bulk save, run the API locally (residential IP) or mount a disk on a
+paid instance and set:
+
+```bash
+MLBD_DB_PATH=/var/data/library.db
+```
+
+The job is resumable, so a restart only loses in-flight titles.
+
+---
+
 ## Free plan limits to know
 
 | Limit | Effect |

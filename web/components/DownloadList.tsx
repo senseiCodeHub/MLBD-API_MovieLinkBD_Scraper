@@ -15,9 +15,9 @@ export function DownloadList({
   );
 
   return (
-    <section className={showHeading ? "mt-8" : "pb-3"}>
+    <section className={showHeading ? "mt-8" : "pb-4"}>
       {showHeading && (
-        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1.5">
           <h3 className="text-sm font-medium text-ink">Download links</h3>
           <p className="text-xs text-faint">
             <span className="tabular-nums">{downloads.length}</span>{" "}
@@ -35,7 +35,7 @@ export function DownloadList({
 
       <ul
         className={`${
-          showHeading ? "mt-3" : "mt-2"
+          showHeading ? "mt-4" : "mt-2"
         } divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface`}
       >
         {downloads.map((download, index) => {
@@ -43,7 +43,7 @@ export function DownloadList({
           return (
             <li
               key={`${download.url}-${index}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 transition-colors duration-150 hover:bg-panel/50"
+              className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3.5 transition-colors duration-200 hover:bg-panel/50"
             >
               <span className="w-16 shrink-0 rounded-md border border-line bg-raised px-1.5 py-0.5 text-center font-mono text-[11px] text-ink">
                 {download.quality ?? "file"}
@@ -71,7 +71,7 @@ export function DownloadList({
                   href={download.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-line px-2 text-xs font-medium text-muted transition-colors duration-150 hover:border-line-strong hover:bg-raised hover:text-ink"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-line px-2 text-xs font-medium text-muted transition-colors duration-200 hover:border-amber/50 hover:bg-amber/5 hover:text-amber"
                 >
                   <ExternalIcon size={13} />
                   Open
@@ -82,7 +82,7 @@ export function DownloadList({
         })}
       </ul>
 
-      <p className="mt-2 text-xs leading-relaxed text-faint">
+      <p className="mt-3 text-xs leading-relaxed text-faint">
         Some titles link straight to the file host; others open MovieLinkBD&apos;s
         own download page, which may show an unlock or ad step before the file.
       </p>

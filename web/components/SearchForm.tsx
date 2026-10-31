@@ -67,7 +67,7 @@ export function SearchForm({
 
   return (
     <form onSubmit={handleSubmit} noValidate>
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1">
           <SearchIcon
             size={17}
@@ -88,7 +88,7 @@ export function SearchForm({
               if (error) setError(null);
             }}
             className={cx(
-              "h-12 w-full rounded-xl border bg-canvas pl-10 pr-10 text-sm text-ink transition-colors duration-150",
+              "h-12 w-full rounded-2xl border bg-canvas pl-11 pr-11 text-sm text-ink transition-colors duration-200",
               error
                 ? "border-rose/60"
                 : "border-line hover:border-line-strong focus:border-amber/60"
@@ -103,7 +103,7 @@ export function SearchForm({
                 inputRef.current?.focus();
               }}
               aria-label="Clear search"
-              className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md text-faint transition-colors hover:bg-raised hover:text-ink"
+              className="absolute right-3 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-md text-faint transition-colors duration-200 hover:bg-raised hover:text-ink"
             >
               <CloseIcon size={14} />
             </button>
@@ -113,7 +113,7 @@ export function SearchForm({
         <button
           type="submit"
           disabled={loading}
-          className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-amber px-5 text-sm font-semibold text-[#1a1205] transition-colors duration-150 hover:bg-amber-soft active:bg-amber-deep disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[8.5rem]"
+          className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-amber px-6 text-sm font-semibold text-[#1a1205] transition-colors duration-200 hover:bg-amber-soft active:bg-amber-deep disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[9rem]"
         >
           {loading ? (
             <>
@@ -137,7 +137,7 @@ export function SearchForm({
         </button>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-faint">
+      <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-faint">
         <span>Title or detail page URL</span>
         <code className="font-mono text-[11px] text-muted">
           movielinkbd.tv/movie/&lt;slug&gt;

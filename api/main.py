@@ -28,6 +28,7 @@ from scraper.catalog import (
     ensure_catalog,
     search_catalog,
 )
+from scraper.diff import diff_scrapes
 from scraper.exceptions import (
     BrowserError,
     CloudflareBlocked,
@@ -36,6 +37,8 @@ from scraper.exceptions import (
 )
 from scraper.scraper import scrape_streams
 from scraper.search import search_content
+
+from api.library import router as library_router
 
 SCRAPE_TIMEOUT = 150
 SEARCH_TIMEOUT = 120
@@ -59,13 +62,13 @@ async def _search_from_db(
     offset: int,
     reason: str | None = None,
 ) -> CatalogResults:
-    """Search the Supabase mirror of the catalogue index."""
-    store = dbstore.get_store()
+    """Search the MySQL mirror of the catalogue index."""
+    store = await dbstore.get_store()
     if store is None:
         raise ScraperError(
             reason
-            or "Supabase is not configured (set SUPABASE_URL and "
-            "SUPABASE_SERVICE_ROLE_KEY), and the live catalogue is unreachable"
+            or "MySQL is not configured (set MYSQL_HOST and MYSQL_DATABASE), "
+            "and the live catalogue is unreachable"
         )
     items, total = await asyncio.wait_for(
         store.search_titles(
@@ -89,7 +92,10 @@ async def _search_from_db(
 
 async def _store_scrape(payload: dict, requested_url: str) -> None:
     """Persist one scrape snapshot; failures never break the response."""
-    store = dbstore.get_store()
+    if not dbstore.writable():
+        # MySQL is not writable (no configured connection): skip mirroring.
+        return
+    store = await dbstore.get_store()
     if store is None:
         return
     try:
@@ -100,14 +106,14 @@ async def _store_scrape(payload: dict, requested_url: str) -> None:
             "Stored scrape for {} ({})", payload.get("page_url"), saved
         )
     except (ScraperError, asyncio.TimeoutError) as exc:
-        logger.warning("Could not store scrape in Supabase: {}", exc)
+        logger.warning("Could not store scrape in MySQL: {}", exc)
 
 
 async def _cached_scrape(
     page_url: str, reason: str | None = None
 ) -> dict | None:
     """Return a fresh stored snapshot for ``page_url``, if any."""
-    store = dbstore.get_store()
+    store = await dbstore.get_store()
     if store is None:
         return None
     try:
@@ -135,6 +141,16 @@ async def _warm_catalog() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        store = await dbstore.get_store()
+        if store is None:
+            logger.warning("MySQL not configured — set MYSQL_HOST / MYSQL_DATABASE")
+        else:
+            await store.stats()
+            logger.info("MySQL library database ready")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not initialise MySQL library: {}", exc)
+
     warm_task = asyncio.create_task(_warm_catalog())
     try:
         yield
@@ -147,6 +163,8 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+app.include_router(library_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -165,6 +183,20 @@ class ScrapeRequest(BaseModel):
 
 
 class ScrapeResponse(BaseModel):
+    ok: bool
+    data: Optional[dict] = None
+    error: Optional[str] = None
+    error_type: Optional[str] = None
+
+
+class CompareRequest(BaseModel):
+    url: str
+    probe: bool = Field(
+        True, description="HEAD each media URL for size and content-type"
+    )
+
+
+class CompareResponse(BaseModel):
     ok: bool
     data: Optional[dict] = None
     error: Optional[str] = None
@@ -245,6 +277,60 @@ async def scrape_get(
 ) -> ScrapeResponse:
     """GET variant for simple browser testing."""
     return await scrape(ScrapeRequest(url=url, probe=probe))
+
+
+@app.post("/compare", response_model=CompareResponse)
+async def compare(req: CompareRequest) -> CompareResponse:
+    """Compare a fresh live scrape against the stored MySQL snapshot.
+
+    Returns a structural diff (added/removed/changed episodes, sources and
+    downloads) plus both payloads so the UI can show what the server has
+    updated since the title was last saved.
+    """
+    try:
+        live = await asyncio.wait_for(
+            scrape_streams(req.url, timeout=30, probe=req.probe),
+            timeout=SCRAPE_TIMEOUT,
+        )
+    except (
+        CloudflareBlocked,
+        NoStreamFound,
+        BrowserError,
+        ScraperError,
+        asyncio.TimeoutError,
+    ) as exc:
+        return CompareResponse(
+            ok=False,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+    live_payload = live.model_dump(mode="json")
+
+    stored: dict[str, Any] | None = None
+    if dbstore.writable():
+        store = await dbstore.get_store()
+        if store is not None:
+            try:
+                detail = await asyncio.wait_for(
+                    store.get_scrape_detail(req.url), timeout=20
+                )
+            except (ScraperError, asyncio.TimeoutError) as exc:
+                logger.warning("Could not read stored scrape: {}", exc)
+                detail = None
+            if detail is not None:
+                stored = detail.get("payload") or {}
+
+    difference = diff_scrapes(stored, live_payload, req.url)
+
+    return CompareResponse(
+        ok=True,
+        data={
+            "page_url": req.url,
+            "stored": stored,
+            "live": live_payload,
+            "diff": difference.to_dict(),
+        },
+    )
 
 
 @app.get("/search", response_model=SearchResponse)
@@ -369,21 +455,54 @@ async def catalog_sync(force: bool = Query(False)) -> dict:
 
 @app.get("/db/status")
 async def db_status() -> dict:
-    """Report whether Supabase is configured and what the mirror holds."""
-    store = dbstore.get_store()
-    if store is None:
+    """Report whether MySQL is configured and what the mirror holds."""
+    cfg = dbstore._read_config()
+    if not cfg["host"] or not cfg["db"]:
         return {
             "configured": False,
+            "mysql": False,
+            "mysql_writable": False,
             "hint": (
-                "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env "
-                "to mirror data into Supabase"
+                "Set MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD and "
+                "MYSQL_DATABASE in .env to use MySQL storage"
             ),
         }
     try:
+        connection = await asyncio.wait_for(dbstore.test_connection(), timeout=10)
+    except (ScraperError, asyncio.TimeoutError) as exc:
+        return {
+            "configured": True,
+            "mysql": False,
+            "mysql_writable": False,
+            "ok": False,
+            "error": str(exc),
+        }
+    if not connection["ok"]:
+        return {
+            "configured": True,
+            "mysql": False,
+            "mysql_writable": False,
+            "ok": False,
+            "error": connection["error"],
+        }
+    try:
+        store = await dbstore.get_store()
         stats = await asyncio.wait_for(store.stats(), timeout=30)
     except (ScraperError, asyncio.TimeoutError) as exc:
-        return {"configured": True, "ok": False, "error": str(exc)}
-    return {"configured": True, **stats}
+        return {
+            "configured": True,
+            "mysql": True,
+            "mysql_writable": True,
+            "ok": False,
+            "error": str(exc),
+        }
+    return {
+        "configured": True,
+        "mysql": True,
+        "mysql_writable": True,
+        "ok": True,
+        **stats,
+    }
 
 
 @app.post("/catalog/refresh")

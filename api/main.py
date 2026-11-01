@@ -90,14 +90,16 @@ async def _search_from_db(
     )
 
 
-async def _store_scrape(payload: dict, requested_url: str) -> None:
-    """Persist one scrape snapshot; failures never break the response."""
+async def _store_scrape(payload: dict, requested_url: str) -> dict[str, Any]:
+    """Persist one scrape snapshot; failures never break the response.
+
+    Returns ``{"saved": bool}`` so the caller can surface library status.
+    """
     if not dbstore.writable():
-        # MySQL is not writable (no configured connection): skip mirroring.
-        return
+        return {"saved": False, "reason": "mysql_not_configured"}
     store = await dbstore.get_store()
     if store is None:
-        return
+        return {"saved": False, "reason": "mysql_not_available"}
     try:
         saved = await asyncio.wait_for(
             store.save_scrape(payload, requested_url=requested_url), timeout=60
@@ -105,8 +107,10 @@ async def _store_scrape(payload: dict, requested_url: str) -> None:
         logger.info(
             "Stored scrape for {} ({})", payload.get("page_url"), saved
         )
+        return {"saved": True, "links": saved.get("links", 0)}
     except (ScraperError, asyncio.TimeoutError) as exc:
         logger.warning("Could not store scrape in MySQL: {}", exc)
+        return {"saved": False, "reason": str(exc)}
 
 
 async def _cached_scrape(
@@ -236,7 +240,9 @@ async def scrape(req: ScrapeRequest) -> ScrapeResponse:
                 return ScrapeResponse(ok=True, data=cached)
             raise
         payload = result.model_dump(mode="json")
-        await _store_scrape(payload, req.url)
+        storage = await _store_scrape(payload, req.url)
+        payload["saved_to_library"] = storage.get("saved", False)
+        payload["saved_links"] = storage.get("links", 0)
         return ScrapeResponse(ok=True, data=payload)
     except CloudflareBlocked as exc:
         return ScrapeResponse(
@@ -277,6 +283,75 @@ async def scrape_get(
 ) -> ScrapeResponse:
     """GET variant for simple browser testing."""
     return await scrape(ScrapeRequest(url=url, probe=probe))
+
+
+class SaveRequest(BaseModel):
+    url: str
+    probe: bool = Field(
+        True, description="HEAD each media URL for size and content-type"
+    )
+
+
+@app.post("/scrape/save", response_model=ScrapeResponse)
+async def scrape_save(req: SaveRequest) -> ScrapeResponse:
+    """Scrape one detail page and force-save it to the MySQL library.
+
+    Skips nothing: always rescrapes and upserts. Returns the scrape payload
+    plus ``saved_to_library`` so the UI can confirm persistence.
+    """
+    try:
+        try:
+            result = await asyncio.wait_for(
+                scrape_streams(req.url, timeout=30, probe=req.probe),
+                timeout=SCRAPE_TIMEOUT,
+            )
+        except (
+            CloudflareBlocked,
+            NoStreamFound,
+            BrowserError,
+            ScraperError,
+            asyncio.TimeoutError,
+        ) as exc:
+            cached = await _cached_scrape(req.url, reason=str(exc))
+            if cached is not None:
+                cached["saved_to_library"] = True
+                return ScrapeResponse(ok=True, data=cached)
+            raise
+        payload = result.model_dump(mode="json")
+        storage = await _store_scrape(payload, req.url)
+        payload["saved_to_library"] = storage.get("saved", False)
+        payload["saved_links"] = storage.get("links", 0)
+        return ScrapeResponse(ok=True, data=payload)
+    except CloudflareBlocked as exc:
+        return ScrapeResponse(
+            ok=False,
+            error=str(exc),
+            error_type="CloudflareBlocked",
+        )
+    except NoStreamFound as exc:
+        return ScrapeResponse(
+            ok=False,
+            error=str(exc),
+            error_type="NoStreamFound",
+        )
+    except BrowserError as exc:
+        return ScrapeResponse(
+            ok=False,
+            error=str(exc),
+            error_type="BrowserError",
+        )
+    except asyncio.TimeoutError:
+        return ScrapeResponse(
+            ok=False,
+            error="Scrape timed out",
+            error_type="Timeout",
+        )
+    except ScraperError as exc:
+        return ScrapeResponse(
+            ok=False,
+            error=str(exc),
+            error_type="ScraperError",
+        )
 
 
 @app.post("/compare", response_model=CompareResponse)

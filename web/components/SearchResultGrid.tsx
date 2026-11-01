@@ -67,16 +67,20 @@ export function SearchResultGrid({
       </div>
 
       <ul className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-        {items.map((item) => {
+        {items.map((item, index) => {
           const label = typeLabel(item);
           return (
-            <li key={item.url}>
+            <li
+              key={item.url}
+              style={{ animationDelay: `${index * 40}ms` }}
+              className="animate-rise"
+            >
               <button
                 type="button"
                 onClick={() => onSelect(item)}
                 disabled={disabled}
                 aria-label={`Scrape stream sources for ${item.title}`}
-                className="group flex h-full w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface text-left transition-colors duration-200 hover:border-amber/50 disabled:cursor-not-allowed disabled:opacity-60"
+                className="group flex h-full w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface text-left transition-colors duration-300 hover:border-amber/50 hover:shadow-[0_10px_30px_-10px_rgba(245,165,36,0.15)] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <span className="relative block aspect-[3/4] w-full overflow-hidden bg-panel">
                   <Poster src={item.poster} />

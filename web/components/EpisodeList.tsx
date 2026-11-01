@@ -11,7 +11,9 @@ function SourceRow({ source }: { source: EpisodeSource }) {
   const name = source.name?.trim();
 
   return (
-    <div className="rounded-xl border border-line/80 bg-panel/40 p-3">
+    <div
+      className="rounded-xl border border-line/80 bg-panel/40 p-3 transition-colors duration-200 hover:bg-raised hover:border-line-strong"
+    >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
         <span className="shrink-0 rounded-md border border-line bg-raised px-1.5 py-0.5 font-mono text-[11px] text-ink">
           {source.quality ?? "auto"}

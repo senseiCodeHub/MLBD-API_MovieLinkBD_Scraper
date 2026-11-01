@@ -1,5 +1,7 @@
 import type { ScrapeSource } from "@/lib/api";
+import type { CSSProperties } from "react";
 import { formatBytes } from "@/lib/format";
+import { cx } from "@/lib/cx";
 import { CopyButton } from "./CopyButton";
 import { ExternalIcon } from "./icons";
 
@@ -23,9 +25,13 @@ function formatBandwidth(bitsPerSecond: number | null) {
 export function SourceCard({
   source,
   index,
+  style,
+  className,
 }: {
   source: ScrapeSource;
   index: number;
+  style?: CSSProperties;
+  className?: string;
 }) {
   const name = source.server_name?.trim() || `Source ${index + 1}`;
   const isHls = source.type === "hls";
@@ -36,7 +42,13 @@ export function SourceCard({
   );
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+    <article
+      className={cx(
+        "overflow-hidden rounded-2xl border border-line bg-surface shadow-sm transition-all duration-300 hover:shadow-[0_20px_40px_-10px_rgba(0,0,0,0.35)] hover:border-amber/50 hover:-translate-y-1",
+        className
+      )}
+      style={style}
+    >
       <header className="flex flex-wrap items-center gap-x-2.5 gap-y-2.5 border-b border-line bg-panel px-5 py-3">
         <span
           className={`shrink-0 rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wider ${TYPE_STYLES[source.type]}`}

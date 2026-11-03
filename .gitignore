@@ -26,8 +26,18 @@ data/
 *.db-wal
 *.db-shm
 
+# PHP deployment: secrets and runtime state
+php/config.php
+php/.env
+php/storage/*
+!php/storage/.htaccess
+
 # OS / editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# Local design review screenshots
+.shots/
+.local-backups/

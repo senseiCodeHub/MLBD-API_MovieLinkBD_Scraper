@@ -142,6 +142,29 @@ Adjust the PHP path (`which php`) and the absolute project path. `cli/sync.php`
 runs the same job as the UI, one batch at a time, until the catalogue is fresh
 or the time budget runs out, then exits.
 
+### Language badges (the shelves depend on them)
+
+The search-suggest shards carry no language, so `mlbd_titles.language` is filled
+from the listing pages instead — each card there wears a
+`<span class="language">` badge (`Bangla`, `Bangla Dubbed`, `Hindi Dubbed`,
+`Dual [Hindi-Tamil]` …) that the API's shelves are answered from.
+
+`cli/sync.php` crawls (and caches) that badge index before it seeds the titles
+table, so a normal sync keeps the column current. To refresh and backfill
+without waiting for a full sync:
+
+```bash
+php cli/taxonomy.php                 # refresh the index and backfill mlbd_titles
+php cli/taxonomy.php --dry-run       # report what would change
+php cli/taxonomy.php --force         # ignore the 6-hour cache
+php cli/taxonomy.php --index-only    # only rebuild storage/cache/taxonomy.json
+```
+
+The crawl reads ~530 listing pages at eight concurrent requests (about a minute
+on a residential line) and is safe to re-run: it only writes `language`, and the
+adult section's Movie/Series `kind`. A host that Cloudflare challenges aborts the
+run instead of writing empty badges.
+
 ### What "refresh" means
 
 * A title counts as **fresh** for `sync.refresh_hours` (default 6). Titles that
@@ -226,6 +249,42 @@ php cli/repair.php --apply --all-links # probe every link, not one per title
 
 A useful split: dead-link repair every hour, and the full `--mode=refresh` pass
 twice a day for new episodes, posters and metadata.
+
+### Filling in stream sizes
+
+`cli/sync.php --probe` measures each file while it scrapes, but it is off by
+default — eight extra requests per title do not fit a three-minute cron budget —
+so most stored links have no `size_bytes` and the app's quality list shows no file
+sizes. `cli/probe.php` fills them in without re-scraping anything:
+
+```bash
+php cli/probe.php                        # backfill for 10 minutes
+php cli/probe.php --limit=200 --dry-run  # report only, write nothing
+php cli/probe.php --minutes=0            # keep going until nothing is missing
+php cli/probe.php --concurrency=16 --minutes=20
+php cli/probe.php --all-links             # re-measure links that already have a size
+```
+
+* It reuses the repair probe: one ranged GET per link, and the
+  `Content-Range: bytes 0-2048/<total>` header carries the whole file's length
+  and MIME type. Nothing is fetched twice.
+* Newest rows are measured first, because a MovieLinkBD token expires and the
+  oldest links mostly answer 403. A dead token is left untouched for
+  `cli/repair.php --apply` to re-scrape.
+* The work list is "links still missing a size", so every run resumes on its own:
+  measured rows drop out, and a time budget just stops a run early. Measured on
+  the real library at concurrency 8: **8–10 links per second** (30 links in 3 s),
+  so a 25-minute run fills in roughly 12–15k links — the 185k that start out
+  missing take about two weeks of one daily run, less if you add a second slot
+  or raise the concurrency.
+* `--all-links` re-measures everything (useful after a CDN changes an encode);
+  without it, a row that already has a size is never touched.
+
+Suggested cron slot (quiet hours, off the sync slots):
+
+```cron
+30 3 * * *  /usr/local/apps/php82/bin/php /home/lnfbojpx/public_html/mlbd-scraper/cli/probe.php --concurrency=16 --minutes=25 >> /home/lnfbojpx/public_html/mlbd-scraper/storage/logs/probe.log 2>&1
+```
 
 ### Running without SSH
 

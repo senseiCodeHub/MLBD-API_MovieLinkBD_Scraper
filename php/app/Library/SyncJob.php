@@ -6,6 +6,7 @@ namespace Mlbd\Library;
 use Mlbd\Scraper\Catalog;
 use Mlbd\Scraper\CloudflareBlocked;
 use Mlbd\Scraper\Scraper;
+use Mlbd\Scraper\Taxonomy;
 use Mlbd\Store\Database;
 use Mlbd\Store\Library;
 
@@ -211,6 +212,18 @@ final class SyncJob
                 // pass only writes snapshots, so without this seed the titles
                 // table (and every db-scoped search) stays empty.
                 [$version] = $catalog->rows();
+                // The shards carry no language badge, so the Bangla and Hindi
+                // shelves would read an empty column. The listing pages carry
+                // it; a crawl failure must not stop the sync, the shelves
+                // simply keep the badges they already have.
+                try {
+                    $taxonomy = new Taxonomy();
+                    if ($taxonomy->ensure() > 0) {
+                        $catalogueItems = $taxonomy->enrich($catalogueItems);
+                    }
+                } catch (\Throwable $exception) {
+                    error_log('MLBD sync: badge index unavailable: ' . $exception->getMessage());
+                }
                 $library->upsertTitles($catalogueItems, $version);
 
                 $state['total'] = count($items);

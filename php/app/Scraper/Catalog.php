@@ -330,8 +330,45 @@ final class Catalog
         $tmp = $path . '.tmp';
         if (@file_put_contents($tmp, $json) !== false) {
             @rename($tmp, $path);
+            $this->pruneCache($path);
         } else {
             @unlink($tmp);
+        }
+    }
+
+    /**
+     * Keep only the newest catalogue snapshots.
+     *
+     * The cache file is named after the catalogue's own version token, and that
+     * token changes on every rebuild — so a fresh ~2 MB file appeared each day
+     * and none of them was ever deleted (storage/cache grew without bound).
+     * Only the current snapshot and one predecessor are ever useful: an older
+     * file describes a catalogue the site no longer serves.
+     */
+    private function pruneCache(string $keepPath): void
+    {
+        $files = glob(storage_path('cache/catalog-*.json')) ?: [];
+        if (count($files) <= 2) {
+            return;
+        }
+
+        usort($files, static fn (string $a, string $b): int => filemtime($b) <=> filemtime($a));
+
+        $keep = [basename($keepPath)];
+        foreach ($files as $file) {
+            if (count($keep) >= 2) {
+                break;
+            }
+            $name = basename($file);
+            if (!in_array($name, $keep, true)) {
+                $keep[] = $name;
+            }
+        }
+
+        foreach ($files as $file) {
+            if (!in_array(basename($file), $keep, true)) {
+                @unlink($file);
+            }
         }
     }
 

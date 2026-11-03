@@ -27,7 +27,10 @@ final class Downloads
     private const DATA_DR = '/\bdata-dr="(\d+)"/';
     private const QUALITY = '/\b(\d{3,4}p)\b/i';
     private const SIZE = '/\b(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)\b/i';
-    private const DOWNLOAD_WORD = '/^\s*(?:⬇\ufe0f?\s*)?download\b[\s:•\-–—\[\]()]*/iu';
+    // PCRE spells a code point `\x{fe0f}`; the Python original's `\ufe0f` does
+    // not compile here, and a failed preg_replace returns null — which used to
+    // blank every download label before its quality and size were read off it.
+    private const DOWNLOAD_WORD = '/^\s*(?:⬇\x{fe0f}?\s*)?download\b[\s:•\-–—\[\]()]*/iu';
 
     /** Normalise a download button label into "480p • 676 MB" form. */
     public static function cleanLabel(string $raw): string

@@ -44,7 +44,7 @@ final class LinkChecker
 
     /**
      * @param list<string> $urls
-     * @return array<string, array{ok: bool, status: int, error: ?string, unknown: bool}>
+     * @return array<string, array{ok: bool, status: int, error: ?string, unknown: bool, size: ?int, content_type: ?string}>
      */
     public function check(array $urls, int $concurrency = 8): array
     {
@@ -65,13 +65,24 @@ final class LinkChecker
      * still valid; everything else — 401/403/404/410, DNS failures, resets — is
      * treated as dead and worth re-scraping.
      *
+     * The same request also carries the file's size and MIME type: a ranged
+     * response reports the whole length as `Content-Range: bytes 0-2048/123456`,
+     * so filling in `size_bytes` needs no second request per link.
+     *
      * @param list<string> $urls
-     * @return array<string, array{ok: bool, status: int, error: ?string, unknown: bool}>
+     * @return array<string, array{ok: bool, status: int, error: ?string, unknown: bool, size: ?int, content_type: ?string}>
      */
     private function runChunk(array $urls): array
     {
         $multi = curl_multi_init();
         $handles = [];
+
+        // Per-URL response headers, captured by the header callback. A new
+        // status line starts a new response, so a redirect chain leaves the
+        // final response's headers behind, not the first hop's. (The blank line
+        // that ends a header block must NOT reset: it arrives *after* the
+        // headers we want, and clearing there loses the final response.)
+        $headerStore = [];
 
         foreach ($urls as $url) {
             $handle = curl_init($url);
@@ -79,6 +90,7 @@ final class LinkChecker
                 continue;
             }
 
+            $headerStore[$url] = [];
             $options = [
                 CURLOPT_RETURNTRANSFER => false,
                 CURLOPT_HEADER         => false,
@@ -94,6 +106,21 @@ final class LinkChecker
                 CURLOPT_ENCODING       => '',
                 CURLOPT_WRITEFUNCTION  => static function ($ch, string $data): int {
                     return strlen($data) > self::SAMPLE_BYTES ? 0 : strlen($data);
+                },
+                CURLOPT_HEADERFUNCTION => static function ($ch, string $line) use (&$headerStore, $url): int {
+                    $trimmed = trim($line);
+                    if ($trimmed === '') {
+                        return strlen($line);
+                    }
+                    if (stripos($trimmed, 'HTTP/') === 0) {
+                        $headerStore[$url] = [];
+                        return strlen($line);
+                    }
+                    $parts = explode(':', $trimmed, 2);
+                    if (count($parts) === 2) {
+                        $headerStore[$url][strtolower(trim($parts[0]))] = trim($parts[1]);
+                    }
+                    return strlen($line);
                 },
             ];
 
@@ -117,6 +144,7 @@ final class LinkChecker
         foreach ($handles as $url => $handle) {
             $code = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
             $error = trim((string) curl_error($handle));
+            $headers = $headerStore[$url] ?? [];
 
             $results[$url] = [
                 'ok'     => ($code >= 200 && $code < 400) || $code === 416,
@@ -126,6 +154,8 @@ final class LinkChecker
                 // that says nothing about the token, so it must not trigger a
                 // re-scrape of the whole library.
                 'unknown' => $code === 0,
+                'size'    => self::sizeFromHeaders($headers, $code),
+                'content_type' => self::strOrNull($headers['content-type'] ?? null),
             ];
 
             curl_multi_remove_handle($multi, $handle);
@@ -134,5 +164,41 @@ final class LinkChecker
 
         curl_multi_close($multi);
         return $results;
+    }
+
+    /**
+     * The whole file's length, from a ranged or plain response.
+     *
+     * A 206 answers `Content-Range: bytes 0-2048/1234567`, where the number
+     * after the slash is the file. A plain 200 can only offer Content-Length —
+     * on a 206 that header is just the range we asked for, so it is ignored
+     * there rather than stored as a wrong size.
+     *
+     * @param array<string, string> $headers
+     */
+    private static function sizeFromHeaders(array $headers, int $status): ?int
+    {
+        $range = trim((string) ($headers['content-range'] ?? ''));
+        if ($range !== '' && preg_match('#/\s*(\d+)\s*$#', $range, $match)) {
+            $total = (int) $match[1];
+            return $total > 0 ? $total : null;
+        }
+
+        if ($status === 206) {
+            return null;
+        }
+
+        $length = trim((string) ($headers['content-length'] ?? ''));
+        if ($length !== '' && ctype_digit($length) && (int) $length > 0) {
+            return (int) $length;
+        }
+
+        return null;
+    }
+
+    private static function strOrNull(?string $value): ?string
+    {
+        $text = trim((string) $value);
+        return $text === '' ? null : $text;
     }
 }

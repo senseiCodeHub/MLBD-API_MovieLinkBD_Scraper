@@ -325,7 +325,7 @@ class MySQLStore:
                     title=VALUES(title),
                     url=VALUES(url),
                     poster=VALUES(poster),
-                    kind=VALUES(kind),
+                    kind=IF(VALUES(kind)='download18plus', kind, VALUES(kind)),
                     category=VALUES(category),
                     year=VALUES(year),
                     adult=VALUES(adult),
@@ -962,13 +962,28 @@ async def sync_catalog(force: bool = False) -> dict[str, Any]:
     for row in raw_rows:
         title, slug, poster, kind, year, adult = row[:6]
         badge = badges.badges_for(str(title)) if badges is not None else None
+
+        # The adult section serves films and series from one path
+        # (/download18plus/…), so the shard kind cannot tell them apart —
+        # the listing's own "Movie"/"Series" badge can. Store the badge as
+        # the row's kind so the API's 18+ movie/series split reads it
+        # instead of guessing from the title. The URL and the category keep
+        # the adult section's identity, and a badge-less sync sends
+        # 'download18plus' again, which the upsert treats as "keep the
+        # stored kind".
+        stored_kind = kind
+        if kind == "download18plus" and badge:
+            badge_type = str(badge.get("type") or "").strip().lower()
+            if badge_type in ("movie", "series", "drama", "anime"):
+                stored_kind = badge_type
+
         rows.append(
             {
                 "slug": (slug or "").strip(),
                 "title": (title or "").strip(),
                 "url": f"{BASE_URL}/{kind}/{quote(str(slug).strip(), safe='')}",
                 "poster": poster,
-                "kind": kind,
+                "kind": stored_kind,
                 "category": CATEGORY_TO_STORED.get(str(kind), "other"),
                 "year": str(year).strip() if year else None,
                 "adult": bool(adult)

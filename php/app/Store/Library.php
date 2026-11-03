@@ -51,6 +51,11 @@ final class Library
      * title, and a NULL here must not erase the language the Python sync
      * filled in from the listing badges (every shelf filter reads it).
      *
+     * ``kind`` is protected the same way: for 18+ rows the Python sync
+     * stores the listing's own "Movie"/"Series" badge (the adult section
+     * serves both from one path), while this web sync only knows
+     * ``download18plus`` — so that value means "keep whatever is stored".
+     *
      * @param list<array<string, mixed>> $rows
      */
     public function upsertTitles(array $rows, ?string $version = null): int
@@ -93,7 +98,7 @@ final class Library
                 title=VALUES(title),
                 url=VALUES(url),
                 poster=VALUES(poster),
-                kind=VALUES(kind),
+                kind=IF(VALUES(kind) = \'download18plus\', kind, VALUES(kind)),
                 category=VALUES(category),
                 year=VALUES(year),
                 adult=VALUES(adult),

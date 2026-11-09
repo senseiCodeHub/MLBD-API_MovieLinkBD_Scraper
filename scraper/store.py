@@ -678,6 +678,14 @@ class MySQLStore:
         )
         return {row["slug"] for row in rows}
 
+    async def get_empty_scraped_slugs(self) -> set[str]:
+        """Return catalogue slugs whose last scrape had no stream links."""
+        rows = await self._fetchall(
+            f"SELECT DISTINCT slug FROM {SCRAPES_TABLE} "
+            "WHERE status = 'empty' AND slug IS NOT NULL AND slug <> ''"
+        )
+        return {row["slug"] for row in rows}
+
     async def get_scrape_detail(self, page_url: str) -> dict[str, Any] | None:
         """Return one stored scrape with its flattened links (for the detail view)."""
         rows = await self._fetchall(

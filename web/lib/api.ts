@@ -67,6 +67,8 @@ export interface ScrapeResult {
   page_url: string;
   cached?: boolean;
   cache_age_seconds?: number;
+  saved_to_library?: boolean;
+  saved_links?: number;
   title: string | null;
   poster: string | null;
   content_type: string | null;

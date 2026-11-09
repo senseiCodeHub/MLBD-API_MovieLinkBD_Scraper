@@ -126,6 +126,7 @@ export default function Home() {
   const [compare, setCompare] = useState<CompareResponse | null>(null);
   const [compareLoading, setCompareLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("sources");
   const [search, setSearch] = useState<SearchState>({ status: "idle" });
@@ -188,6 +189,39 @@ export default function Home() {
       }
     },
     [setNetworkError]
+  );
+
+  const saveToLibrary = useCallback(
+    async (url: string) => {
+      setSaving(true);
+      try {
+        const response = await fetch(`${API_BASE}/scrape/save`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, probe: false }),
+        });
+        if (!response.ok) {
+          throw new Error(`Save failed (${response.status})`);
+        }
+        const result = await response.json();
+        if (result.ok && result.data?.saved_to_library) {
+          setResult({ ok: true, data: result.data, error: null, error_type: null });
+          setTab("sources");
+          setNetworkError(null);
+        } else {
+          setNetworkError(
+            result.error || "Could not save to library"
+          );
+        }
+      } catch (error) {
+        setNetworkError(
+          error instanceof Error ? error.message : "Save request failed"
+        );
+      } finally {
+        setSaving(false);
+      }
+    },
+    [setTab, setNetworkError]
   );
 
   const runSearch = useCallback(
@@ -541,6 +575,8 @@ export default function Home() {
                       compare={compare}
                       compareLoading={compareLoading}
                       onCompare={runCompare}
+                      saving={saving}
+                      onSaveToLibrary={saveToLibrary}
                     />
                   ) : null}
                 </div>
@@ -668,6 +704,8 @@ function Results({
   compare,
   compareLoading,
   onCompare,
+  saving,
+  onSaveToLibrary,
 }: {
   data: ScrapeResult;
   tab: Tab;
@@ -675,11 +713,14 @@ function Results({
   compare: CompareResponse | null;
   compareLoading: boolean;
   onCompare: (url: string) => void;
+  saving: boolean;
+  onSaveToLibrary: (url: string) => void;
 }) {
   const hasEpisodes = data.episodes.length > 0;
   const categoryLabel =
     RESULT_CATEGORY_LABELS[data.category] ?? RESULT_CATEGORY_LABELS.other;
   const diff = compare?.ok && compare.data ? compare.data.diff : null;
+  const saved = Boolean(data.saved_to_library);
 
   return (
     <section className="animate-rise">
@@ -691,7 +732,7 @@ function Results({
               src={data.poster}
               alt=""
               referrerPolicy="no-referrer"
-              className="hidden h-[8rem] w-24 shrink-0 rounded-2xl border border-line object-cover sm:block shadow-[0_10px_15px_-3px_rgba(0,0,0,0.4)]"
+              className="hidden h-[8rem] w-24 shrink-0 rounded-2xl border border-line object-cover sm:block shadow-[0_10px_15px_-3px_rgba(0,0,0,0.4)] group-hover:scale-105 transition-transform duration-300"
             />
           )}
           <div className="min-w-0">
@@ -710,12 +751,17 @@ function Results({
                   18+
                 </span>
               )}
+              {saved && (
+                <span className="rounded-md border border-mint/30 bg-mint/10 px-2 py-0.5 text-[10px] font-medium text-mint">
+                  Saved to library
+                </span>
+              )}
             </div>
             <a
               href={data.page_url}
               target="_blank"
               rel="noreferrer"
-              className="mt-2 inline-flex max-w-full items-center gap-1.5 text-sm text-muted transition-colors duration-150 hover:text-amber"
+              className="mt-2 inline-flex max-w-full items-center gap-1.5 text-sm text-muted transition-colors duration-200 hover:text-amber"
             >
               <span className="truncate">{data.page_url}</span>
               <ExternalIcon size={13} className="shrink-0" />
@@ -748,6 +794,14 @@ function Results({
                   {formatTime(data.scraped_at)}
                 </span>
               </span>
+              {saved && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-mint font-medium">
+                    synced to MySQL
+                  </span>
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -771,7 +825,7 @@ function Results({
               aria-pressed={tab === value}
               disabled={value === "compare" && !data.page_url}
               className={cx(
-                "rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150",
+                "rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-200",
                 tab === value
                   ? "bg-raised text-ink"
                   : "text-faint hover:text-muted"
@@ -780,6 +834,17 @@ function Results({
               {label}
             </button>
           ))}
+          {!saved && data.page_url && (
+            <button
+              type="button"
+              onClick={() => void onSaveToLibrary(data.page_url)}
+              disabled={saving}
+              className="ml-2 rounded-md border border-amber/40 bg-amber/5 px-3 py-1.5 text-xs font-medium text-amber-soft transition-colors duration-200 hover:border-amber/70 hover:bg-amber/10 hover:text-amber disabled:opacity-60"
+            >
+              {saving ? <SpinnerIcon size={13} /> : null}
+              {saving ? "Saving…" : "Save to library"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -808,6 +873,8 @@ function Results({
                 key={`${source.master_url}-${index}`}
                 source={source}
                 index={index}
+                style={{ animationDelay: `${index * 60}ms` }}
+                className="animate-rise"
               />
             ))}
 

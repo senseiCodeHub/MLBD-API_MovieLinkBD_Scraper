@@ -19,7 +19,10 @@ from urllib.parse import quote, unquote
 
 router = APIRouter(prefix="/library", tags=["library"])
 
-MAX_CONSECUTIVE_FAILURES = 10
+MAX_CONSECUTIVE_FAILURES = 15
+
+DEFAULT_CONCURRENCY = 6
+MAX_CONCURRENCY = 12
 
 
 def _now() -> str:
@@ -44,7 +47,10 @@ class SyncRequest(BaseModel):
         False, description="HEAD each stream URL for size (slower)"
     )
     concurrency: int = Field(
-        3, ge=1, le=8, description="Titles scraped in parallel"
+        DEFAULT_CONCURRENCY,
+        ge=1,
+        le=MAX_CONCURRENCY,
+        description="Titles scraped in parallel",
     )
     limit: Optional[int] = Field(
         None, ge=1, description="Stop after this many titles (for testing)"
@@ -181,28 +187,36 @@ async def _run_sync(req: SyncRequest) -> None:
         pushed = await store.upsert_titles(rows)
         logger.info("Seeded {} catalogue titles to MySQL", pushed)
 
-        # Determine which titles still need scraping
-        if req.force or req.retry_empty:
+        # Determine which titles still need scraping.
+        # Match on slug as well as page_url: the catalogue URL (slug form)
+        # and the stored canonical URL (mKs_ id) never match, so a URL-only
+        # check re-scraped the whole catalogue on every run.
+        if req.force:
             queue = list(items)
             _sync.skipped = 0
+        elif req.retry_empty:
+            # Re-scrape titles that previously returned no stream links.
+            empty_slugs = await store.get_empty_scraped_slugs()
+            queue = [
+                item
+                for item in items
+                if (item.slug or "") in empty_slugs
+            ]
+            _sync.skipped = len(items) - len(queue)
+            _sync.message = f"Retrying {len(queue)} no-stream titles"
         else:
-            # Match on slug as well as page_url: the catalogue URL (slug form)
-            # and the stored canonical URL (mKs_ id) never match, so a URL-only
-            # check re-scraped the whole catalogue on every run.
-            scraped = await store.get_scraped_keys()
             scraped_slugs = await store.get_scraped_slugs()
             queue = [
                 item
                 for item in items
-                if item.url not in scraped
-                and (item.slug or "") not in scraped_slugs
+                if (item.slug or "") not in scraped_slugs
             ]
             _sync.skipped = len(items) - len(queue)
 
         _sync.total = len(items)
         _sync.processed = _sync.skipped
         _sync.message = (
-            f"Scraping {len(queue)} titles"
+            f"Scraping {len(queue)} new titles"
             if queue
             else "Everything is already saved"
         )
@@ -269,7 +283,13 @@ async def _run_sync(req: SyncRequest) -> None:
                     if not _sync.cancelling:
                         _sync.current = None
 
-        await asyncio.gather(*(work(item) for item in queue))
+        # Process in batches so a huge queue doesn't memory-bloat.
+        BATCH = 200
+        for start in range(0, len(queue), BATCH):
+            if _sync.cancelling:
+                break
+            batch = queue[start : start + BATCH]
+            await asyncio.gather(*(work(item) for item in batch))
 
         if aborted:
             _sync.message = (

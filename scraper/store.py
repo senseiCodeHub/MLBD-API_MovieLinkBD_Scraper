@@ -44,6 +44,7 @@ from loguru import logger
 
 from .catalog import BASE_URL, CatalogItem, catalog_rows, ensure_catalog
 from .exceptions import ScraperError
+from .taxonomy import taxonomy_index
 
 TITLES_TABLE = "mlbd_titles"
 SCRAPES_TABLE = "mlbd_scrapes"
@@ -324,12 +325,12 @@ class MySQLStore:
                     title=VALUES(title),
                     url=VALUES(url),
                     poster=VALUES(poster),
-                    kind=VALUES(kind),
+                    kind=IF(VALUES(kind)='download18plus', kind, VALUES(kind)),
                     category=VALUES(category),
                     year=VALUES(year),
                     adult=VALUES(adult),
                     quality=VALUES(quality),
-                    language=VALUES(language),
+                    language=COALESCE(VALUES(language), language),
                     rating=VALUES(rating),
                     source_version=VALUES(source_version),
                     updated_at=VALUES(updated_at)
@@ -941,19 +942,54 @@ async def sync_catalog(force: bool = False) -> dict[str, Any]:
     count = await ensure_catalog(force=force)
     version, raw_rows = await catalog_rows()
 
+    # The catalogue shards carry no language; the listing badges do. Without
+    # them every language shelf ("Bangla", "Hindi Dubbed", …) would answer
+    # nothing, so read them first — but never let a badge outage stop the sync:
+    # upserts keep the stored language when the new value is NULL (COALESCE),
+    # so a failed crawl simply leaves the previous data alone.
+    try:
+        badges = await taxonomy_index(force=force)
+        logger.info(
+            "Taxonomy badges loaded: {} titles, {} with a language",
+            badges.count,
+            badges.counts["with_language"],
+        )
+    except ScraperError as exc:
+        badges = None
+        logger.warning("Taxonomy unavailable ({}); keeping stored languages", exc)
+
     rows: list[dict[str, Any]] = []
     for row in raw_rows:
         title, slug, poster, kind, year, adult = row[:6]
+        badge = badges.badges_for(str(title)) if badges is not None else None
+
+        # The adult section serves films and series from one path
+        # (/download18plus/…), so the shard kind cannot tell them apart —
+        # the listing's own "Movie"/"Series" badge can. Store the badge as
+        # the row's kind so the API's 18+ movie/series split reads it
+        # instead of guessing from the title. The URL and the category keep
+        # the adult section's identity, and a badge-less sync sends
+        # 'download18plus' again, which the upsert treats as "keep the
+        # stored kind".
+        stored_kind = kind
+        if kind == "download18plus" and badge:
+            badge_type = str(badge.get("type") or "").strip().lower()
+            if badge_type in ("movie", "series", "drama", "anime"):
+                stored_kind = badge_type
+
         rows.append(
             {
                 "slug": (slug or "").strip(),
                 "title": (title or "").strip(),
                 "url": f"{BASE_URL}/{kind}/{quote(str(slug).strip(), safe='')}",
                 "poster": poster,
-                "kind": kind,
+                "kind": stored_kind,
                 "category": CATEGORY_TO_STORED.get(str(kind), "other"),
                 "year": str(year).strip() if year else None,
-                "adult": bool(adult) or kind == "download18plus",
+                "adult": bool(adult)
+                or kind == "download18plus"
+                or bool(badge and badge.get("adult")),
+                "language": (badge or {}).get("language") or None,
             }
         )
 

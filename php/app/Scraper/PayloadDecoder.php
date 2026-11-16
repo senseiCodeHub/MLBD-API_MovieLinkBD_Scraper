@@ -4,10 +4,12 @@ declare(strict_types=1);
 namespace Mlbd\Scraper;
 
 /**
- * Decodes the ``#mlbdInlinePlayerData`` element embedded in every detail page.
+ * Decodes the legacy ``#mlbdInlinePlayerData`` element found on older detail
+ * pages.
  *
  * The body is base64 + XOR against the LCG stream seeded by ``data-s`` and
- * advanced ``data-r`` rounds before the first byte.
+ * advanced ``data-r`` rounds before the first byte. Current pages no longer
+ * emit it; see `PlayerDecoder` for the `/p/<token>` → `window.__PD2` player.
  */
 final class PayloadDecoder
 {
@@ -24,8 +26,10 @@ final class PayloadDecoder
             return null;
         }
 
-        $body = $match[1][0] ?? '';
-        $start = $match[0][1] ?? 0;
+        $body = (string) ($match[1][0] ?? '');
+        // PREG_OFFSET_CAPTURE reports byte offsets as int; the cast keeps
+        // static analysis from reading the match array as strings.
+        $start = (int) ($match[0][1] ?? 0);
 
         // Search the opening tag first, then fall back to a window around it.
         $tagEnd = strpos($markup, '>', $start);

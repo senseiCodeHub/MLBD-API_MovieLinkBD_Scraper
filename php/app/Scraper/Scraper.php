@@ -8,16 +8,20 @@ use Mlbd\Http\HttpClient;
 /**
  * Main orchestration: scrape($pageUrl) -> ScrapeResult array.
  *
- * MovieLinkBD serves the whole player payload for a detail page in an inline
- * ``<script id="mlbdInlinePlayerData">`` element. The body is XOR-encoded JSON
- * and contains every episode and every source (stream URL + download URL +
- * quality + audio) for the title. That is the primary extraction path.
+ * MovieLinkBD has two player generations:
  *
- * If the payload is missing (Cloudflare interstitial, new page type) the
- * scraper falls back to reading ``<video>``/``<source>`` tags and the page's
- * ``data-dl`` download buttons directly from the HTML. Unlike the original
- * Playwright fallback this needs no headless browser, which makes it work on
- * shared PHP hosting such as Webuzo.
+ *  - Old pages embedded `<script id="mlbdInlinePlayerData">` with XOR-encoded
+ *    JSON (``PayloadDecoder``). Kept as a fallback for pages that still serve it.
+ *  - Current pages render `<iframe id="mlbdHdFrame" src="/p/<token>">`. The
+ *    embed page contains a plain `window.__PD2` object with the HLS master
+ *    (`watch.movielink.tv/m/…`) and a direct MP4 per episode
+ *    (``PlayerDecoder``). That is the primary extraction path now.
+ *
+ * If neither payload exists (Cloudflare interstitial, title with online
+ * playback disabled) the scraper falls back to reading `<video>`/`<source>`
+ * tags and the page's `data-dl` download buttons directly from the HTML.
+ * Unlike the original Playwright fallback this needs no headless browser,
+ * which makes it work on shared PHP hosting such as Webuzo.
  *
  * The ad-gated "UNLOCK & WATCH NOW" button is never clicked and no ad iframe is
  * followed; only the site's own player data is read.
@@ -95,13 +99,52 @@ final class Scraper
     // -----------------------------------------------------------------------
 
     /**
-     * Fetch a detail page and decode its inline player payload.
+     * Fetch a detail page and decode its player payload.
      *
-     * @return array{0:?array<string,mixed>,1:string}
+     * Tries the legacy inline payload first, then `window.__PD2` on the page
+     * itself (a `/p/<token>` embed URL), then the page's player iframe.
+     *
+     * @return array{0:?array<string,mixed>,1:string,2:string}
      */
     private function fetchPayload(string $pageUrl): array
     {
-        $response = $this->http->request($pageUrl, $this->browserHeaders(), [
+        $response = $this->fetchPage($pageUrl, $this->browserHeaders());
+
+        $markup = $response['body'];
+        $finalUrl = $response['url'];
+
+        $payload = PayloadDecoder::decode($markup);
+        if ($payload !== null) {
+            return [$payload, $finalUrl, $markup];
+        }
+
+        $payload = PlayerDecoder::decode($markup);
+        if ($payload !== null) {
+            return [$payload, $finalUrl, $markup];
+        }
+
+        $embedUrl = PlayerDecoder::iframeUrl($markup, $finalUrl);
+        if ($embedUrl === null) {
+            return [null, $finalUrl, $markup];
+        }
+
+        // The embed page is same-origin, so the detail page is a valid referer.
+        $embed = $this->fetchPage($embedUrl, array_merge($this->browserHeaders(), [
+            'referer' => $finalUrl,
+        ]), 'Player embed');
+
+        return [PlayerDecoder::decode($embed['body']), $finalUrl, $markup];
+    }
+
+    /**
+     * Fetch a page and turn Cloudflare/HTTP failures into scraper exceptions.
+     *
+     * @param array<string, string> $headers
+     * @return array{ok:bool,status:int,headers:array<string,string>,body:string,url:string,error:?string}
+     */
+    private function fetchPage(string $url, array $headers, string $label = 'Detail page'): array
+    {
+        $response = $this->http->request($url, $headers, [
             'timeout' => $this->pageTimeout,
             'follow'  => true,
         ]);
@@ -110,27 +153,27 @@ final class Scraper
             $message = (string) ($response['error'] ?? 'unknown error');
             if (stripos($message, 'certificate') !== false || stripos($message, 'SSL') !== false) {
                 throw new ScraperError(
-                    'Detail page request failed: ' . $message
+                    $label . ' request failed: ' . $message
                     . ' — this host has no CA store; point scraper.ca_bundle at a cacert.pem file.'
                 );
             }
-            throw new ScraperError('Detail page request failed: ' . $message);
+            throw new ScraperError($label . ' request failed: ' . $message);
         }
 
         $head = strtolower(substr($response['body'], 0, 6000));
         if (in_array($response['status'], [403, 429, 503], true)) {
-            throw new CloudflareBlocked($pageUrl);
+            throw new CloudflareBlocked($url);
         }
         foreach (self::CLOUDFLARE_MARKERS as $marker) {
             if (str_contains($head, strtolower($marker))) {
-                throw new CloudflareBlocked($pageUrl);
+                throw new CloudflareBlocked($url);
             }
         }
         if ($response['status'] >= 400) {
-            throw new ScraperError('Detail page returned HTTP ' . $response['status']);
+            throw new ScraperError($label . ' returned HTTP ' . $response['status']);
         }
 
-        return [PayloadDecoder::decode($response['body']), $response['url']];
+        return $response;
     }
 
     /**
@@ -138,10 +181,20 @@ final class Scraper
      */
     private function scrapePayload(string $pageUrl, bool $probe): array
     {
-        [$payload, $finalUrl] = $this->fetchPayload($pageUrl);
+        [$payload, $finalUrl, $markup] = $this->fetchPayload($pageUrl);
 
         if ($payload === null) {
-            throw new NoStreamFound($pageUrl, ['reason' => 'inline player payload not found']);
+            $reason = 'player payload not found';
+            if (stripos($markup, 'mlbd-watch-maint') !== false) {
+                $reason = 'site has disabled online playback for this title (maintenance notice)';
+            }
+            throw new NoStreamFound($pageUrl, ['reason' => $reason]);
+        }
+
+        $htmlDownloads = Downloads::parseFromHtml($markup, $finalUrl);
+
+        if (PlayerDecoder::isPlayerPayload($payload)) {
+            return $this->scrapePlayer($payload, $htmlDownloads, $finalUrl, $probe, $markup);
         }
 
         $streamUrls = [];
@@ -165,6 +218,7 @@ final class Scraper
 
         $probes = $probe ? $this->probeMany($streamUrls, $finalUrl) : [];
         [$episodes, $sources, $downloads] = $this->buildEpisodes($payload, $probes, $finalUrl);
+        $downloads = $this->mergeDownloads($downloads, $htmlDownloads);
 
         if ($episodes === [] && $downloads === []) {
             throw new NoStreamFound($pageUrl, [
@@ -187,6 +241,402 @@ final class Scraper
             'sources'      => $sources,
             'downloads'    => $downloads,
         ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Player v2 path (`window.__PD2` from the /p/ embed page)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Build the result from the redesigned player payload.
+     *
+     * Each episode carries one HLS master (`watch.movielink.tv/m/…`) and one
+     * direct MP4 (`…workers.dev/p/…`). The HLS master is the stream the site's
+     * own player uses; the MP4 is the direct file, so it is offered both as the
+     * source's download link and, when the detail page has no `data-dl`
+     * buttons, as a download row.
+     *
+     * @param array<string, mixed>              $payload
+     * @param list<array<string, mixed>>        $htmlDownloads
+     * @return array<string, mixed>
+     */
+    private function scrapePlayer(
+        array $payload,
+        array $htmlDownloads,
+        string $finalUrl,
+        bool $probe,
+        string $markup
+    ): array {
+        $rawEpisodes = $payload['episodes'] ?? null;
+        if (!is_array($rawEpisodes) || $rawEpisodes === []) {
+            // A single-title payload can omit `episodes`; wrap the top level.
+            $rawEpisodes = [[
+                'label'  => $payload['label'] ?? null,
+                'master' => $payload['master'] ?? null,
+                'mp4'    => $payload['mp4'] ?? null,
+                'audio'  => $payload['audio'] ?? [],
+                'subs'   => $payload['subs'] ?? [],
+                'number' => null,
+                'season' => null,
+            ]];
+        }
+
+        $rawEpisodes = array_values(array_filter($rawEpisodes, 'is_array'));
+
+        $mp4Urls = [];
+        foreach ($rawEpisodes as $rawEpisode) {
+            $mp4 = trim((string) ($rawEpisode['mp4'] ?? ''));
+            if ($mp4 !== '') {
+                $mp4Urls[] = url_join($finalUrl, $mp4);
+            }
+        }
+        if (count($rawEpisodes) === 1 && $mp4Urls === []) {
+            $mp4 = trim((string) ($payload['mp4'] ?? ''));
+            if ($mp4 !== '') {
+                $mp4Urls[] = url_join($finalUrl, $mp4);
+            }
+        }
+
+        $probes = $probe ? $this->probeMany($mp4Urls, $finalUrl) : [];
+
+        $topAudio = $this->playerAudioLanguages($payload['audio'] ?? []);
+        $langs = str_or_null($payload['langs'] ?? null);
+
+        $episodes = [];
+        $flatSources = [];
+        $downloads = [];
+        $seenStreams = [];
+        $seenDownloads = [];
+
+        foreach ($rawEpisodes as $rawEpisode) {
+            $number = $this->positiveInt($rawEpisode['number'] ?? null);
+            $season = $this->positiveInt($rawEpisode['season'] ?? null);
+            $label = $this->playerEpisodeLabel($rawEpisode, count($episodes), $number, $season);
+
+            $master = trim((string) ($rawEpisode['master'] ?? ''));
+            if ($master === '' && count($rawEpisodes) === 1) {
+                $master = trim((string) ($payload['master'] ?? ''));
+            }
+            $masterUrl = $master !== '' ? url_join($finalUrl, $master) : null;
+
+            $mp4 = trim((string) ($rawEpisode['mp4'] ?? ''));
+            if ($mp4 === '' && count($rawEpisodes) === 1) {
+                $mp4 = trim((string) ($payload['mp4'] ?? ''));
+            }
+            $mp4Url = $mp4 !== '' ? url_join($finalUrl, $mp4) : null;
+
+            $audioLanguages = array_values(array_unique(array_merge(
+                $this->playerAudioLanguages($rawEpisode['audio'] ?? []),
+                $topAudio
+            )));
+            $audioText = $this->clip(
+                $audioLanguages !== [] ? implode(', ', $audioLanguages) : $langs,
+                60
+            );
+
+            $episodeSources = [];
+
+            if ($masterUrl !== null) {
+                $variants = $this->hlsVariants($masterUrl, $finalUrl, $probe);
+                $quality = $this->bestVariantQuality($variants);
+
+                $episodeSources[] = [
+                    'id'               => 'hls',
+                    'provider'         => 'MLBD HD',
+                    'quality'          => $quality,
+                    'quality_label'    => $quality,
+                    'audio'            => $audioText,
+                    'audio_languages'  => $audioLanguages,
+                    'type'             => 'hls',
+                    'name'             => 'HLS master',
+                    'codec'            => null,
+                    'hevc'             => null,
+                    'is_best'          => true,
+                    'stream_url'       => $masterUrl,
+                    'download_url'     => $mp4Url,
+                    // The CDN only serves the playlist to clients that send
+                    // `Referer: https://movielinkbd.tv/`; the MP4 has no such
+                    // gate, so `direct_url` is what VLC and other apps want.
+                    'direct_url'       => $mp4Url,
+                    'requires_referer' => true,
+                    // The playlist is disguised as image/jpeg byte ranges;
+                    // its Content-Length is the playlist size, not the movie.
+                    'size_bytes'       => null,
+                    'content_type'     => 'application/vnd.apple.mpegurl',
+                ];
+
+                if (!isset($seenStreams[$masterUrl])) {
+                    $seenStreams[$masterUrl] = true;
+                    $flatSources[] = [
+                        'server_name' => 'MLBD HD',
+                        'type'        => 'hls',
+                        'master_url'  => $masterUrl,
+                        'variants'    => $variants,
+                        'size_bytes'  => null,
+                        'content_type' => 'application/vnd.apple.mpegurl',
+                    ];
+                }
+            } elseif ($mp4Url !== null) {
+                // No HLS master on this episode: the MP4 is the only stream.
+                [$contentType, $sizeBytes] = $probes[$mp4Url] ?? [null, null];
+
+                $episodeSources[] = [
+                    'id'               => 'mp4',
+                    'provider'         => $this->serverName($mp4Url),
+                    'quality'          => 'auto',
+                    'quality_label'    => null,
+                    'audio'            => $audioText,
+                    'audio_languages'  => $audioLanguages,
+                    'type'             => 'mp4',
+                    'name'             => 'Direct MP4',
+                    'codec'            => null,
+                    'hevc'             => null,
+                    'is_best'          => true,
+                    'stream_url'       => $mp4Url,
+                    'download_url'     => $mp4Url,
+                    'direct_url'       => $mp4Url,
+                    'requires_referer' => false,
+                    'size_bytes'       => $sizeBytes,
+                    'content_type'     => $contentType,
+                ];
+
+                if (!isset($seenStreams[$mp4Url])) {
+                    $seenStreams[$mp4Url] = true;
+                    $flatSources[] = [
+                        'server_name' => $this->serverName($mp4Url),
+                        'type'        => 'mp4',
+                        'master_url'  => $mp4Url,
+                        'variants'    => [[
+                            'quality'   => 'auto',
+                            'bandwidth' => null,
+                            'url'       => $mp4Url,
+                        ]],
+                        'size_bytes'   => $sizeBytes,
+                        'content_type' => $contentType,
+                    ];
+                }
+            }
+
+            $episodes[] = [
+                'id'          => $this->playerEpisodeId($rawEpisode, $label, count($episodes)),
+                'label'       => $label,
+                'number'      => $number,
+                'season'      => $season,
+                'range_start' => null,
+                'range_end'   => null,
+                'kind'        => $number !== null || $season !== null ? 'episode' : null,
+                'sources'     => $episodeSources,
+            ];
+
+            // The MP4 is a working direct file even when `/file/…` download
+            // tokens are Cloudflare-challenged, so keep it as a fallback row.
+            if ($mp4Url !== null) {
+                $key = $mp4Url . "\0" . $label;
+                if (!isset($seenDownloads[$key])) {
+                    $seenDownloads[$key] = true;
+                    $sizeBytes = $probes[$mp4Url][1] ?? null;
+                    $downloads[] = [
+                        'label'      => 'Direct MP4',
+                        'quality'    => null,
+                        'size'       => $this->formatSize($sizeBytes),
+                        'size_bytes' => $sizeBytes,
+                        'episode'    => $label,
+                        'url'        => $mp4Url,
+                        'type'       => 'mp4',
+                        'audio'      => $audioText,
+                    ];
+                }
+            }
+        }
+
+        $downloads = $this->mergeDownloads($downloads, $htmlDownloads);
+
+        if ($episodes === [] || ($flatSources === [] && $downloads === [])) {
+            throw new NoStreamFound($finalUrl, [
+                'reason'     => 'player payload had no usable master or mp4 URL',
+                'page_title' => str_or_null($payload['title'] ?? null) ?? $this->pageTitle($markup),
+            ]);
+        }
+
+        $category = $this->categoryFromUrl($finalUrl, $payload);
+        $contentType = in_array($category, ['movie', 'series', 'drama', 'anime'], true)
+            ? $category
+            : str_or_null($payload['content_type'] ?? null);
+
+        return $this->result([
+            'page_url'     => $finalUrl,
+            'title'        => str_or_null($payload['title'] ?? null) ?? $this->pageTitle($markup),
+            'poster'       => str_or_null($payload['poster'] ?? null) ?? $this->metaContent($markup, 'og:image'),
+            'content_type' => $contentType,
+            'category'     => $category,
+            'adult'        => $category === 'adult',
+            'completed'    => null,
+            'episodes'     => $episodes,
+            'sources'      => $flatSources,
+            'downloads'    => $downloads,
+        ]);
+    }
+
+    /**
+     * Parse an HLS master playlist, falling back to the master URL itself.
+     *
+     * The playlist answers `Content-Type: image/jpeg`, so this deliberately
+     * skips content-type validation: the body is still standard m3u8.
+     *
+     * @return list<array{quality:string,bandwidth:?int,url:string}>
+     */
+    private function hlsVariants(string $masterUrl, string $referer, bool $probe): array
+    {
+        if ($probe) {
+            $variants = HlsParser::parse($masterUrl, [
+                'user-agent' => $this->userAgent,
+                'referer'    => $referer,
+            ]);
+            if ($variants !== []) {
+                return $variants;
+            }
+        }
+
+        return [[
+            'quality'   => 'auto',
+            'bandwidth' => null,
+            'url'       => $masterUrl,
+        ]];
+    }
+
+    /**
+     * @param list<array{quality:string,bandwidth:?int,url:string}> $variants
+     */
+    private function bestVariantQuality(array $variants): string
+    {
+        $best = null;
+        $bestBandwidth = -1;
+        foreach ($variants as $variant) {
+            $bandwidth = $variant['bandwidth'] ?? null;
+            if ($bandwidth === null) {
+                $bandwidth = 0;
+            }
+            if ($best === null || $bandwidth > $bestBandwidth) {
+                $best = $variant['quality'] ?? null;
+                $bestBandwidth = $bandwidth;
+            }
+        }
+
+        return $best !== null && $best !== '' && $best !== 'auto' ? $best : 'auto';
+    }
+
+    /**
+     * Human-readable audio track labels (`Hindi`, `Assamese`, …).
+     *
+     * @param mixed $tracks
+     * @return list<string>
+     */
+    private function playerAudioLanguages($tracks): array
+    {
+        if (!is_array($tracks)) {
+            return [];
+        }
+
+        $languages = [];
+        foreach ($tracks as $track) {
+            if (!is_array($track)) {
+                continue;
+            }
+            $label = trim((string) ($track['label'] ?? ''));
+            if ($label !== '') {
+                // "Hindi | MovieLinkBD.one" -> "Hindi"
+                $parts = preg_split('/\s*[|•]\s*/u', $label) ?: [];
+                $label = trim((string) ($parts[0] ?? ''));
+            }
+            if ($label === '') {
+                $label = strtoupper(trim((string) ($track['language'] ?? '')));
+            }
+            if ($label !== '' && !in_array($label, $languages, true)) {
+                $languages[] = $label;
+            }
+        }
+
+        return $languages;
+    }
+
+    private function playerEpisodeLabel(
+        array $rawEpisode,
+        int $index,
+        ?int $number,
+        ?int $season
+    ): string {
+        if ($number !== null) {
+            return $season !== null
+                ? sprintf('S%02dE%02d', $season, $number)
+                : sprintf('E%02d', $number);
+        }
+
+        $label = trim((string) ($rawEpisode['label'] ?? ''));
+        if ($label !== '') {
+            return $label;
+        }
+
+        return 'Episode ' . ($index + 1);
+    }
+
+    private function playerEpisodeId(array $rawEpisode, string $label, int $index): string
+    {
+        $id = trim((string) ($rawEpisode['id'] ?? ''));
+        return $id !== '' ? $id : $label . '#' . $index;
+    }
+
+    private function positiveInt($value): ?int
+    {
+        if (is_int($value)) {
+            return $value > 0 ? $value : null;
+        }
+        if (is_numeric($value)) {
+            $number = (int) $value;
+            return $number > 0 ? $number : null;
+        }
+        return null;
+    }
+
+    /** Trim a DB-bound text column (links.audio is VARCHAR(64)). */
+    private function clip(?string $value, int $max): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+        return mb_strlen($value) > $max ? rtrim(mb_substr($value, 0, $max)) : $value;
+    }
+
+    /**
+     * De-duplicate download rows by URL + episode, keeping the first label.
+     *
+     * @param list<array<string, mixed>> $primary
+     * @param list<array<string, mixed>> $fallback
+     * @return list<array<string, mixed>>
+     */
+    private function mergeDownloads(array $primary, array $fallback): array
+    {
+        $merged = [];
+        $seen = [];
+        foreach (array_merge($primary, $fallback) as $download) {
+            if (!is_array($download)) {
+                continue;
+            }
+            $url = trim((string) ($download['url'] ?? ''));
+            if ($url === '') {
+                continue;
+            }
+            $key = $url . "\0" . (string) ($download['episode'] ?? '');
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $merged[] = $download;
+        }
+        return $merged;
     }
 
     // -----------------------------------------------------------------------
@@ -823,6 +1273,23 @@ final class Scraper
      */
     private function result(array $fields): array
     {
+        $episodes = [];
+        foreach ((array) $fields['episodes'] as $episode) {
+            if (!is_array($episode)) {
+                continue;
+            }
+            $sources = [];
+            foreach ((array) ($episode['sources'] ?? []) as $source) {
+                if (!is_array($source)) {
+                    continue;
+                }
+                $source += ['direct_url' => null, 'requires_referer' => null];
+                $sources[] = $source;
+            }
+            $episode['sources'] = $sources;
+            $episodes[] = $episode;
+        }
+
         return [
             'page_url'     => $fields['page_url'],
             'title'        => $fields['title'],
@@ -831,7 +1298,7 @@ final class Scraper
             'category'     => $fields['category'],
             'adult'        => $fields['adult'],
             'completed'    => $fields['completed'],
-            'episodes'     => $fields['episodes'],
+            'episodes'     => $episodes,
             'sources'      => $fields['sources'],
             'downloads'    => $fields['downloads'],
             'scraped_at'   => now_iso(),

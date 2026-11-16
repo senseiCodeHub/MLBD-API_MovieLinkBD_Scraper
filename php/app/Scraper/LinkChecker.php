@@ -145,6 +145,16 @@ final class LinkChecker
             $code = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
             $error = trim((string) curl_error($handle));
             $headers = $headerStore[$url] ?? [];
+            $contentType = self::strOrNull($headers['content-type'] ?? null);
+
+            // MovieLinkBD's HLS masters are served as `image/jpeg` byte-range
+            // playlists, so Content-Length is the playlist size (~300 B), not
+            // the movie. Leave the size empty rather than store a wrong number;
+            // the real variants are counted from the playlist when needed.
+            $size = self::sizeFromHeaders($headers, $code);
+            if ($contentType !== null && str_starts_with(strtolower($contentType), 'image/')) {
+                $size = null;
+            }
 
             $results[$url] = [
                 'ok'     => ($code >= 200 && $code < 400) || $code === 416,
@@ -154,8 +164,8 @@ final class LinkChecker
                 // that says nothing about the token, so it must not trigger a
                 // re-scrape of the whole library.
                 'unknown' => $code === 0,
-                'size'    => self::sizeFromHeaders($headers, $code),
-                'content_type' => self::strOrNull($headers['content-type'] ?? null),
+                'size'    => $size,
+                'content_type' => $contentType,
             ];
 
             curl_multi_remove_handle($multi, $handle);

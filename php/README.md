@@ -98,6 +98,67 @@ with *Retry no-stream titles*), real failures with `failed`. After
 `sync.max_consecutive_failures` consecutive failures the run stops rather than
 hammering a blocked site.
 
+### How a detail page is scraped (player generations)
+
+MovieLinkBD has shipped two player generations, and the scraper understands
+both:
+
+1. **Legacy inline payload.** Older pages embedded
+   `<script id="mlbdInlinePlayerData">` with XOR-encoded JSON. That path is
+   still tried first, so old pages keep working.
+2. **Current Player v2.** A detail page now renders
+   `<iframe id="mlbdHdFrame" src="/p/<token>">`. The scraper fetches that embed
+   page (with the detail page as referer) and reads its `window.__PD2` JSON:
+
+   * `episodes[].master` — the HLS master playlist on
+     `watch.movielink.tv/m/…`. It is served with `Content-Type: image/jpeg`
+     and byte-range segments, but the body is a normal `#EXTM3U` playlist, so
+     `HlsParser` reads it regardless of the MIME type.
+   * `episodes[].mp4` — the direct file on the site's worker CDN
+     (`…workers.dev/p/…`). It answers `video/mp4`, so it is stored as the
+     episode's download link and listed as a download row.
+   * `audio[]` — per-episode audio tracks; their labels become the source's
+     `audio` / `audio_languages`.
+   * `langs`, `title`, `poster` — used for metadata.
+
+Downloads are still decoded from the page's `data-dl` buttons with the same
+LCG, and are merged with the direct MP4 rows.
+
+### Playing a scraped link outside the browser
+
+The two links are not equally portable, so every episode source carries both a
+`stream_url` and a `direct_url`:
+
+| Field | What it is | Who can open it |
+| --- | --- | --- |
+| `direct_url` | the episode's MP4 on the worker CDN (`…workers.dev/p/…`) | anything: VLC, mpv, ffmpeg, Kodi, a mobile app. No cookies, no `Referer`, byte-range seeking works, `Access-Control-Allow-Origin: *` |
+| `stream_url` | the HLS master (`watch.movielink.tv/m/…`) | only clients that can send `Referer: https://movielinkbd.tv/`; without it the CDN answers `403` with `#EXT-X-ERROR:forbidden` |
+
+`requires_referer` marks HLS sources (`true`), so an app that cannot set headers
+should fall back to `direct_url` (which is the same episode's MP4). Measured
+examples: a 1080p drama episode is a single `1920x1080` H.264/AAC MP4, ~20 Mbps,
+served directly; the MP4 URLs also stayed valid across scrapes while the HLS
+tokens changed per request.
+
+VLC, from a terminal:
+
+```bash
+# Direct MP4 — plain URL, works out of the box
+vlc "https://fsl.mks-lukatube.workers.dev/p/<token>"
+
+# HLS — must send the site referer, otherwise HTTP 403
+vlc --http-referrer="https://movielinkbd.tv/" "https://watch.movielink.tv/m/<token>"
+```
+
+ffmpeg/ffprobe need `-headers "Referer: https://movielinkbd.tv/"` for the HLS
+master, and fMP4 segments named `*.jpg` trip ffmpeg's HLS extension check, so the
+MP4 is the simpler choice there too.
+
+Series pages currently show `div.mlbd-watch-maint` ("online watch is being
+updated") and expose no player iframe at all. For those titles the scrape
+stores the download grid and is marked `empty`; when the operator re-enables
+the player the iframe reappears and the next scrape picks it up automatically.
+
 ## Scheduled scraping (cron)
 
 The library can refresh itself without anyone opening the site. Add one cron
@@ -218,10 +279,11 @@ the first run is recorded, so a fresh install shows nothing rather than zeros.
 
 ### Repairing expired stream links
 
-MovieLinkBD hands out opaque per-request stream tokens (`https://fsldownload.com/p/…`)
-that expire after a few hours, so a full refresh of every detail page is mostly
-wasted work. `cli/repair.php` checks the stored links instead and only re-scrapes
-the titles that actually broke:
+MovieLinkBD hands out opaque per-request stream tokens (`watch.movielink.tv/m/…`
+for HLS and the worker CDN `…workers.dev/p/…` for MP4) that expire after a few
+hours, so a full refresh of every detail page is mostly wasted work.
+`cli/repair.php` checks the stored links instead and only re-scrapes the titles
+that actually broke:
 
 ```bash
 php cli/repair.php                    # preview: count dead links
@@ -401,8 +463,9 @@ php/
 
 ## Differences from the Python service
 
-* No headless browser: scraping uses the inline player payload and a plain-HTML
-  fallback. `BrowserError` does not exist here.
+* No headless browser: scraping reads the current `/p/<token>` player payload
+  (`window.__PD2`), keeps the legacy inline payload as a fallback, and has a
+  plain-HTML fallback. `BrowserError` does not exist here.
 * Sync is sequential and browser-driven, not an asyncio background task.
 * SQLite is gone; MySQL is the only store.
 * Library stats report `size_bytes: 0` (shared hosts rarely allow table-size

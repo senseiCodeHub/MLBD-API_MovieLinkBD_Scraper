@@ -129,8 +129,9 @@ $errorCopy = match ($type) {
                                             </span>
                                         </div>
                                         <div class="src-links">
-                                            <?php if (!empty($src['stream_url'])): ?>
-                                                <a class="btn btn-small" href="<?= e((string) $src['stream_url']) ?>" target="_blank" rel="noopener nofollow">Stream ↗</a>
+                                            <?php $playUrl = $src['direct_url'] ?? $src['stream_url'] ?? null; ?>
+                                            <?php if (!empty($playUrl)): ?>
+                                                <a class="btn btn-small" href="<?= e((string) $playUrl) ?>" target="_blank" rel="noopener nofollow">Play ↗</a>
                                             <?php endif; ?>
                                             <?php if (!empty($src['download_url'])): ?>
                                                 <a class="btn btn-small btn-quiet" href="<?= e((string) $src['download_url']) ?>" target="_blank" rel="noopener nofollow">Download ↓</a>

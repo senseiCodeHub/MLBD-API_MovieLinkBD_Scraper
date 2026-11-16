@@ -548,21 +548,23 @@ final class Library
                     continue;
                 }
                 $episodeSources[] = [
-                    'id'              => $source['id'] ?? null,
-                    'provider'        => $source['provider'] ?? null,
-                    'quality'         => $source['quality'] ?? null,
-                    'quality_label'   => $source['quality_label'] ?? null,
-                    'audio'           => $source['audio'] ?? null,
-                    'audio_languages' => $source['audio_languages'] ?? null,
-                    'type'            => $source['type'] ?? null,
-                    'name'            => $source['name'] ?? null,
-                    'codec'           => $source['codec'] ?? null,
-                    'hevc'            => $source['hevc'] ?? null,
-                    'is_best'         => $source['is_best'] ?? null,
-                    'stream_url'      => $source['stream_url'] ?? null,
-                    'download_url'    => $source['download_url'] ?? null,
-                    'size_bytes'      => $source['size_bytes'] ?? null,
-                    'content_type'    => $source['content_type'] ?? null,
+                    'id'               => $source['id'] ?? null,
+                    'provider'         => $source['provider'] ?? null,
+                    'quality'          => $source['quality'] ?? null,
+                    'quality_label'    => $source['quality_label'] ?? null,
+                    'audio'            => $source['audio'] ?? null,
+                    'audio_languages'  => $source['audio_languages'] ?? null,
+                    'type'             => $source['type'] ?? null,
+                    'name'             => $source['name'] ?? null,
+                    'codec'            => $source['codec'] ?? null,
+                    'hevc'             => $source['hevc'] ?? null,
+                    'is_best'          => $source['is_best'] ?? null,
+                    'stream_url'       => $source['stream_url'] ?? null,
+                    'download_url'     => $source['download_url'] ?? null,
+                    'direct_url'       => $source['direct_url'] ?? null,
+                    'requires_referer' => $source['requires_referer'] ?? null,
+                    'size_bytes'       => $source['size_bytes'] ?? null,
+                    'content_type'     => $source['content_type'] ?? null,
                 ];
             }
             $episodes[] = [
